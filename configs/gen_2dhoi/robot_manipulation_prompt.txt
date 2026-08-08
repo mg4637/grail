@@ -1,0 +1,11 @@
+# Segment 1
+The person picks up the wooden chair in front of them with both hands. The camera should remain static.
+
+# Segment 2
+The person carries the chair a few steps and sets it down upright on the floor right next to the wooden bookshelf. The camera should remain static.
+
+# Segment 3
+The person climbs up and stands on top of the chair, balancing carefully, then reaches up and grabs the basket sitting on top of the bookshelf. The camera should remain static.
+
+# Segment 4
+The person climbs back down off the chair onto the floor, holding the basket in their hands. The camera should remain static.

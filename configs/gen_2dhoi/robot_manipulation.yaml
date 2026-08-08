@@ -1,0 +1,75 @@
+character: kid
+character_dir: data/characters
+texture_dir: data/characters
+results_dir: results_collection/robot_manipulation001
+object_config: configs/objects/comasset.yaml
+verbose: false
+skip_step1: true
+skip_step2: true
+skip_step3: false
+skip_step4: false
+skip_done: false
+paths:
+  prompts_dir: "generation/prompts"
+  initial_state_dir: "generation/initial_states"
+  obj_scale_dir: "generation/obj_scales"
+  render_dir: "generation/asset_renders"
+  camera_dir: "generation/cameras"
+  foundation_pose_input_dir: "generation/foundation_pose"
+  depth_save_dir: "generation/depth_maps"
+  video_output_dir: "generation/videos_kling"
+simulation:
+  drop_height: 0.1
+  settling_time: 5.0
+  initial_rotation_perturbation: 5.0
+  seed: 42
+  save_usd: false
+  use_initial_state: true
+scale:
+  max_iterations: 5
+rendering:
+  samples: 128
+  width: 1280
+  height: 720
+  num_rand_scenes: 1
+  gpu: true
+  no_rand_seed: true
+  render_start_end: false
+video:
+  num_videos: 1
+  num_video_segments: 4
+  model_api: kling-ai
+  kling_model_name: kling-v2-5-turbo
+  duration: "5"
+  kling_mode: std
+  skip_prompt_refinement: true
+  base_prompt: "The person picks up the wooden chair in front of them with both hands. The camera should remain static.#The person carries the chair a few steps and sets it down upright on the floor right next to the wooden bookshelf. The camera should remain static.#The person climbs up and stands on top of the chair, balancing carefully, then reaches up and grabs the basket sitting on top of the bookshelf. The camera should remain static.#The person climbs back down off the chair onto the floor, holding the basket in their hands. The camera should remain static."
+  seg_idx_for_tail_image: -1
+  use_all_tail_images: false
+  video_max_retries: 3
+  video_retry_wait: 5
+chatgpt:
+  prompt_refinement_system_message:
+    - |
+      Create a simple video prompt for a humanoid robot interacting with a {category}.
+
+      Base prompt: "{base_prompt}"
+
+      Requirements:
+      1. The robot interacts with the object physically and realistically, respecting gravity and balance.
+      2. Static camera - no camera movement
+      3. Keep continuity with whatever the robot is already holding/doing - don't undo previous actions
+
+      IMPORTANT: Respond with ONLY the refined prompt text. Do not include any preambles, explanations, or conversational phrases like "Sure, here's..." or "Here is...". Just output the prompt directly.
+  scale_evaluation_system_message: |
+    You are evaluating whether a {category} in a rendered indoor scene has the correct real-world size.
+
+    Look at the image carefully. There is a robot and a {category} in the scene. Judge whether the {category} appears to be the correct real-world size relative to the robot and the room.
+
+    You MUST respond with EXACTLY one word — one of the following three options:
+    - "small" if the object looks too small compared to its real-world size
+    - "big" if the object looks too big compared to its real-world size
+    - "correct" if the object appears to be approximately the correct real-world size
+
+    Do NOT include any other text, explanation, or punctuation. Just one word.
+scene_config: configs/scenes/default.yaml
