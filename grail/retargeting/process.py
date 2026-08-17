@@ -186,6 +186,40 @@ def _hand_action_from_start(num_frames, start_frame):
     return action
 
 
+def _contact_intervals(contact_points, bridge_frames=0):
+    """Frame ranges over which a hand is touching the object.
+
+    Contact detection drops out for a frame or two mid-grasp, so runs separated
+    by no more than `bridge_frames` idle frames are merged into one interval.
+    """
+    frames = sorted(k for k, v in contact_points.items() if _contact_has_points(v))
+    intervals = []
+    for f in frames:
+        if intervals and f - intervals[-1][1] <= bridge_frames + 1:
+            intervals[-1][1] = f
+        else:
+            intervals.append([f, f])
+    return [(s, e) for s, e in intervals]
+
+
+def _hand_action_from_contact_intervals(
+    num_frames, contact_points, anticipation_frames, release_frames, bridge_frames
+):
+    """Close the hand shortly before each contact and open it again afterwards.
+
+    `_hand_action_from_start` latches shut at the first grasp and never reopens.
+    That is right for pick-and-carry, where the object stays in hand to the end
+    of the clip, but wrong for a motion that sets the object back down — the
+    robot is then commanded to keep gripping thin air for the rest of the take.
+    It also anchors every hand to a single lift frame, so a hand whose first
+    contact lands one frame *after* the lift is never told to grasp at all.
+    """
+    action = np.full(num_frames, -1.0, dtype=np.float32)
+    for start, end in _contact_intervals(contact_points, bridge_frames):
+        action[max(0, start - anticipation_frames) : min(num_frames, end + release_frames + 1)] = 1.0
+    return action
+
+
 SHOULDER_BLEND_JOINTS = {
     "left": {"pitch": 15, "roll": 16, "yaw": 17},
     "right": {"pitch": 22, "roll": 23, "yaw": 24},
@@ -505,6 +539,32 @@ def build_arg_parser():
         ),
     )
     parser.add_argument(
+        "--hand_action_from_contacts",
+        "--hand-action-from-contacts",
+        action="store_true",
+        help=(
+            "Derive each hand action from that hand's actual contact intervals, opening "
+            "the hand again once contact ends. Use for motions that release the object "
+            "(carry-then-put-down, climbing onto it) rather than pick-and-carry, where "
+            "the default latched grasp would keep gripping air. Requires "
+            "--treat_hands_equally."
+        ),
+    )
+    parser.add_argument(
+        "--hand_release_frames",
+        "--hand-release-frames",
+        type=int,
+        default=5,
+        help="Frames to keep a hand closed after its contact ends (--hand_action_from_contacts)",
+    )
+    parser.add_argument(
+        "--contact_bridge_frames",
+        "--contact-bridge-frames",
+        type=int,
+        default=8,
+        help="Merge contact runs separated by at most this many frames of dropout",
+    )
+    parser.add_argument(
         "--table_size",
         type=float,
         nargs=3,
@@ -547,6 +607,9 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     print(f"Input:  {base_dir}")
     print(f"Output: {out_dir}")
+
+    if args.hand_action_from_contacts and not args.treat_hands_equally:
+        parser.error("--hand_action_from_contacts requires --treat_hands_equally")
 
     zero_out_left_arm = not args.treat_hands_equally
     rotate_table_90_deg = False
@@ -766,6 +829,15 @@ def main():
                 hand_actions = {}
                 for hand in ("left", "right"):
                     contact_points = object_motion[f].get(f"contact_points_{hand}_hand", {})
+                    if args.hand_action_from_contacts:
+                        hand_actions[hand] = _hand_action_from_contact_intervals(
+                            T,
+                            contact_points,
+                            grasp_anticipation_frames,
+                            args.hand_release_frames,
+                            args.contact_bridge_frames,
+                        )
+                        continue
                     if lift_frame is not None:
                         hand_contact_frame = (
                             lift_frame

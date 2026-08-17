@@ -43,6 +43,9 @@ optimization:
 
   cache_list:
     - contact_labels
+    # Interaction onset for a static object comes from a VLM, so it can't be
+    # re-derived offline — cache it like the contact labels.
+    - interaction
 
   vis_cfg:
     vis_init: true
@@ -135,8 +138,21 @@ optimization:
         contact:
           weight: 30000.0
           duration: "all"
-          depth_only: true
-          max_contact_dist: 0.15
+          depth_only: false
+          max_contact_dist: 0.5
+          # Score foot contact against the seat (upward-facing faces)
+          # only — otherwise a foot on the floor beside a chair LEG
+          # already satisfies the loss and never gets lifted.
+          support_surface_only: true
+          # Distance-to-surface alone is happy with a foot balanced on the front
+          # rim of the seat; this is what pushes it back onto the seat.
+          containment_weight: 1.0
+        # See manip_smplx.yaml — prevents contact points sliding across the
+        # object while HMR floor-contact probs are ~0 (limb up on the object).
+        contact_smoothness:
+          weight: 100.0
+          window: 8
+          stride: 2
 
   eval:
     keypoint_tracking:

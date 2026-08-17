@@ -10,12 +10,14 @@ from grail.optimization.loss_terms import (
     contact_distribution_smoothness_loss,
     contact_loss,
     contact_smoothness_loss,
+    foot_support_loss,
     ground_loss,
     keypoint_loss,
     l1_loss,
     penetration_loss,
     reg_loss,
     smoothness_loss,
+    support_containment_loss,
 )
 from grail.rendering.camera import project_world_to_screen, unproject_depth_map_to_world
 
@@ -39,6 +41,7 @@ class LossComputer:
         self.num_body_joints = num_body_joints
         self.logger = logger
         self._depth_loss_cache = None
+        self._canon_vert_normals = None
 
     # ── Dispatch ─────────────────────────────────────────────────────────────
 
@@ -89,11 +92,82 @@ class LossComputer:
         # labels (e.g. predicted "right hand" when the hand is nowhere near the
         # object). None disables the gate (default).
         max_contact_dist = cfg.get("max_contact_dist", None)
+        # 2D screen-space pre-filter radius (pixels) used by contact_depth_loss
+        # to decide which object vertices are "under" the contact body part
+        # before scoring depth alignment. Too tight and it silently zeroes the
+        # loss for frames where the initial (pre-optimization) 2D estimate is
+        # off by more than this many pixels, leaving them unoptimizable.
+        screen_dist_thresh = cfg.get("screen_dist_thresh", 20.0)
         contact_loss_fn = contact_loss
         if cfg.get("use_center_loss", False):
             contact_loss_fn = contact_center_loss
         elif depth_only:
             contact_loss_fn = contact_depth_loss
+
+        # Weight-bearing labels need the whole segment supported, not just its
+        # closest vertex (see foot_support_loss docstring) — a depth-only loss
+        # also can't fix the lateral misalignment that causes a foot to hang
+        # off an object's edge, so these always use the full-3D foot loss.
+        # Ankles always qualify (standing/climbing). Configs can add hand
+        # labels here for flat-surface push/support contact (e.g. climbing
+        # onto a table) — but NOT for grasp contact (e.g. gripping a chair
+        # rail), where only part of the hand is meant to touch.
+        support_labels = {"L_Ankle", "R_Ankle"} | set(cfg.get("support_labels", []))
+        # Measure support contact against only the object's upward-facing
+        # surfaces. Otherwise a foot standing on the FLOOR beside a chair leg
+        # sits centimetres from the leg mesh and fully satisfies "foot touches
+        # chair" — so the loss produces no gradient to lift it onto the seat,
+        # leaving the foot ~40cm low (reads as "stepping into air" from above).
+        support_surface_only = cfg.get("support_surface_only", False)
+        support_min_cos = cfg.get("support_min_cos", 0.5)
+        # Relative weight of the in-plane containment penalty that keeps a
+        # weight-bearing limb from settling on the rim of its support surface
+        # (see support_containment_loss). 0 disables it.
+        containment_weight = cfg.get("containment_weight", 1.0)
+        # Thickness of the horizontal surface a limb is scored against, once
+        # that surface has been picked (see _support_target).
+        surface_band = cfg.get("support_surface_band", 0.05)
+
+        def _support_target(cv_i, obj_i, i):
+            """Object vertices the given segment is meant to be supported by."""
+            if not support_surface_only:
+                return obj_i
+            mask = self._upward_facing_mask(data, pred, i, support_min_cos)
+            # Fall back to the full mesh if this object has no meaningful
+            # upward-facing surface (degenerate mesh / bad winding).
+            if int(mask.sum()) < 10:
+                return obj_i
+            up = obj_i[mask]
+
+            # An object can have several upward-facing surfaces at different
+            # heights — a chair has a seat *and* the top of its backrest, a
+            # table a top *and* a low stretcher. Taking the nearest point over
+            # all of them lets a foot satisfy "on the chair" against a backrest
+            # rail, so score against one surface: the one whose height is
+            # closest to the sole, which is the one being stood on or reached
+            # for. Selecting by "highest surface at or below the sole" instead
+            # makes the target flip to a stretcher half a metre down the moment
+            # a hand dips below the tabletop, and the loss then hauls it there.
+            z = up[:, 2].detach()
+            sole_z = cv_i[:, 2].detach().min()
+            surface_z = z[(z - sole_z).abs().argmin()]
+            band = (z - surface_z).abs() <= surface_band
+            return up[band] if int(band.sum()) >= 10 else up
+
+        def _term(cv_i, obj_i, label, i):
+            if label in support_labels:
+                sup_i = _support_target(cv_i, obj_i, i)
+                term = foot_support_loss(cv_i, sup_i)
+                if containment_weight:
+                    term = term + containment_weight * support_containment_loss(
+                        cv_i, sup_i, pred.obj.R[i], pred.obj.trans[i]
+                    )
+                return term
+            if depth_only:
+                return contact_loss_fn(
+                    cv_i, obj_i, self.cameras, screen_dist_thresh=screen_dist_thresh
+                )
+            return contact_loss_fn(cv_i, obj_i)
 
         def _too_far(human_verts, obj_verts):
             if max_contact_dist is None or human_verts.numel() == 0 or obj_verts.numel() == 0:
@@ -115,10 +189,7 @@ class LossComputer:
                     cv = self.human_model.get_verts_segment(human_verts_seq, [label])
                     if _too_far(cv[i], obj_verts_seq[i]):
                         continue
-                    if depth_only:
-                        loss += weight * contact_loss_fn(cv[i], obj_verts_seq[i], self.cameras)
-                    else:
-                        loss += weight * contact_loss_fn(cv[i], obj_verts_seq[i])
+                    loss += weight * _term(cv[i], obj_verts_seq[i], label, i)
                     count += 1
             if count > 0:
                 loss /= count
@@ -135,10 +206,7 @@ class LossComputer:
                     cv = self.human_model.get_verts_segment(human_verts_seq, [label])
                     if _too_far(cv[i], obj_verts_seq[i]):
                         continue
-                    if depth_only:
-                        loss += weight * contact_loss_fn(cv[i], obj_verts_seq[i], self.cameras)
-                    else:
-                        loss += weight * contact_loss_fn(cv[i], obj_verts_seq[i])
+                    loss += weight * _term(cv[i], obj_verts_seq[i], label, i)
                     count += 1
             if count > 0:
                 loss /= count
@@ -147,9 +215,22 @@ class LossComputer:
         else:
             raise ValueError(f"Invalid duration: {cfg['duration']}")
 
-        if data.is_static_obj:
-            loss = 0.0 * loss
         return loss
+
+    def _upward_facing_mask(self, data, pred, frame_idx, min_cos):
+        """Boolean mask over object vertices whose world normal points up.
+
+        Canonical vertex normals are computed once and rotated into world space
+        per frame, which is far cheaper than rebuilding a Meshes each call. The
+        mask only selects vertices (a non-differentiable index), so detaching
+        the rotation here costs no gradient on the selected positions.
+        """
+        if self._canon_vert_normals is None:
+            mesh = Meshes(verts=[data.obj.verts.float()], faces=[data.obj.faces.long()])
+            self._canon_vert_normals = mesh.verts_normals_packed().detach()
+        # n_world = R @ n_canon, batched as (V,3) @ R^T; world up axis is +z.
+        n_world = self._canon_vert_normals @ pred.obj.R[frame_idx].detach().transpose(0, 1)
+        return n_world[:, 2] > min_cos
 
     def _keypoint_tracking_loss(self, data, pred, cfg, weight):
         pred_body_kp = pred.human.body_keypoints_seq
@@ -334,13 +415,16 @@ class LossComputer:
             frame_labels = self.get_contact_labels_for_frame((ws + we) // 2)
             if frame_labels is None:
                 continue
-            contact_verts_seq = self.human_model.get_verts_segment(
-                human_verts_seq, frame_labels[:2]
-            )
-            loss_accum = loss_accum + contact_smoothness_loss(
-                verts_A_seq=contact_verts_seq[ws:we], verts_B_seq=obj_verts_seq[ws:we]
-            )
-            win_count += 1
+            # One term per labelled body part. Pooling them into a single vertex
+            # set would let the part in firmest contact fill the loss's top-k
+            # pair budget on its own, leaving every other labelled part free to
+            # slide — and a third label would be dropped outright.
+            for label in frame_labels:
+                contact_verts_seq = self.human_model.get_verts_segment(human_verts_seq, [label])
+                loss_accum = loss_accum + contact_smoothness_loss(
+                    verts_A_seq=contact_verts_seq[ws:we], verts_B_seq=obj_verts_seq[ws:we]
+                )
+                win_count += 1
 
         if win_count == 0:
             return human_verts_seq.new_zeros(())

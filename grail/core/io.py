@@ -821,7 +821,15 @@ def run_subprocess(cmd, description, shell=False, env=None, cwd=None):
 
     try:
         result = subprocess.run(
-            cmd, shell=shell, check=True, capture_output=True, text=True, env=env, cwd=cwd
+            cmd,
+            shell=shell,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            cwd=cwd,
         )
 
         duration = time.time() - start_time

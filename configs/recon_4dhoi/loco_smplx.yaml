@@ -47,6 +47,9 @@ optimization:
 
   cache_list:
     - contact_labels
+    # Interaction onset for a static object comes from a VLM, so it can't be
+    # re-derived offline — cache it like the contact labels.
+    - interaction
 
   vis_cfg:
     vis_init: false
@@ -96,6 +99,26 @@ optimization:
           num_gt_samples: 3000
           trim_pct: 0.2
           depth_tol: 0.02
+        contact:
+          weight: 30000.0
+          duration: "all"
+          depth_only: false
+          max_contact_dist: 0.5
+          # LOCO hand contact is flat-surface push/support (e.g. climbing onto
+          # a table), not a grasp — require the whole hand supported like feet.
+          support_labels: ["L_Hand", "R_Hand"]
+          # Score support contact against the tabletop only.
+          support_surface_only: true
+          # Distance-to-surface alone is happy with a limb balanced on the rim;
+          # this is what pushes it back over the surface.
+          containment_weight: 1.0
+        # Keeps contact points from sliding across the object surface. The
+        # human_foot_contact anti-skate term only fires on HMR *floor* contact
+        # probabilities, which read ~0 while a limb is up on the object.
+        contact_smoothness:
+          weight: 100.0
+          window: 8
+          stride: 2
 
   eval:
     keypoint_tracking:

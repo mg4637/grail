@@ -108,6 +108,98 @@ def contact_loss(verts_A, verts_B, num_vertices=2000, top_k=200, delta=0.001):
     return contact_loss_value
 
 
+def foot_support_loss(verts_A, verts_B, trim_pct=0.3, delta=0.001):
+    """
+    Contact loss for weight-bearing body parts (feet/ankles), where physical
+    plausibility requires most of the queried vertex segment to rest on the
+    surface — not just its single closest point.
+
+    Unlike `contact_loss`, which pools A->B and B->A nearest distances and
+    only backprops through the globally smallest top_k pairs, this can be
+    satisfied by a single touching vertex (fine for a hand grasp, but for a
+    foot it lets one toe "touch" while the rest of the foot dangles off an
+    edge with zero gradient). Instead, this penalizes the nearest-object
+    distance for every vertex in A (the body segment), trimming only the
+    worst `trim_pct` fraction to allow for legitimate partial lift (e.g. a
+    heel or toe raised mid-stride).
+
+    Args:
+        verts_A (torch.Tensor): queried body-segment vertices (N, 3)
+        verts_B (torch.Tensor): object vertices (M, 3)
+        trim_pct (float): fraction of A's worst (farthest) vertices to discard
+        delta (float): Huber loss threshold
+    """
+    distances = torch.cdist(verts_A.float(), verts_B.float())  # (N, M)
+    min_dist_A = distances.min(dim=1).values  # (N,) nearest object point per body vertex
+
+    k = max(1, int(len(min_dist_A) * (1.0 - trim_pct)))
+    trimmed, _ = min_dist_A.topk(k, largest=False)
+
+    return huber_loss(trimmed, delta=delta)
+
+
+def support_containment_loss(verts_A, verts_B, obj_R, obj_t, trim_pct=0.15, delta=0.001):
+    """
+    Penalize how far a weight-bearing body segment overhangs its support surface.
+
+    Every distance-to-surface contact loss (`contact_loss`, `foot_support_loss`)
+    is a *nearest point* loss, and the nearest point on a surface to something
+    hanging past its edge lies on the edge itself. So a foot resting on the very
+    rim of a table — or 90% off it, over thin air — already scores a perfect
+    zero, and there is no gradient anywhere in the objective pushing it back
+    onto the surface. This term supplies exactly that missing in-plane force:
+    it is zero while the segment is over the surface and grows with the
+    horizontal distance once it isn't.
+
+    Containment is measured against the axis-aligned box of the support
+    vertices *in the object's own frame*, not the world frame, so a rotated
+    (or carried) object still gets a tight footprint rather than the loose
+    world-axis-aligned hull of its corners. The two in-plane axes are the
+    object axes that aren't the near-vertical one — asset meshes are variously
+    y-up or z-up, and using the wrong pair collapses the footprint to a
+    millimetres-thin slab. The box is treated as fixed: the gradient should
+    move the human onto the object, not resize or slide the object under the
+    human — the object's own placement is already pinned by the mask and depth
+    terms.
+
+    Args:
+        verts_A (torch.Tensor): body-segment vertices (N, 3), world frame
+        verts_B (torch.Tensor): support-surface vertices (M, 3), world frame
+        obj_R (torch.Tensor): (3, 3) object rotation, object -> world
+        obj_t (torch.Tensor): (3,) object translation, object -> world
+        trim_pct (float): fraction of A's worst vertices to discard. Lower than
+            `foot_support_loss`'s: that one trims to allow a heel or toe lifted
+            *off* the surface, which is common, whereas a limb hanging *past*
+            the edge is only normal for the very tip of a foot
+        delta (float): Huber loss threshold
+    """
+    if verts_A.numel() == 0 or verts_B.numel() == 0:
+        return verts_A.new_zeros(())
+
+    R = obj_R.detach().float()
+    t = obj_t.detach().reshape(1, 3).float()
+
+    # Object axes expressed in world; drop the one closest to world up (+z).
+    vertical = int(R[2, :].abs().argmax())
+    plane = [a for a in range(3) if a != vertical]
+    basis = R[:, plane]  # (3, 2)
+
+    local_B = (verts_B.detach().float() - t) @ basis  # world -> object in-plane
+    local_A = (verts_A.float() - t) @ basis
+
+    lo = local_B.min(dim=0).values
+    hi = local_B.max(dim=0).values
+
+    # Per-axis overhang, zero inside the footprint.
+    overhang = torch.relu(lo - local_A) + torch.relu(local_A - hi)
+    dist = torch.linalg.norm(overhang, dim=-1)  # (N,)
+
+    k = max(1, int(len(dist) * (1.0 - trim_pct)))
+    trimmed, _ = dist.topk(k, largest=False)
+
+    return huber_loss(trimmed, delta=delta)
+
+
 def contact_depth_loss(
     verts_A, verts_B, cameras, num_vertices=2000, top_k=200, delta=0.001, screen_dist_thresh=20.0
 ):

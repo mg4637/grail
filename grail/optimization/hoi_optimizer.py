@@ -118,7 +118,7 @@ class HOIOptimizer:
 
         # 4. Interaction detection
         inter_start_idx, inter_end_idx, is_static_obj = self._detect_interaction(
-            obj_poses_incam, images_path, human_masks, obj_masks
+            video_id, obj_poses_incam, images_path, human_masks, obj_masks
         )
 
         # 5. Human motion data
@@ -271,8 +271,26 @@ class HOIOptimizer:
         self.logger.info(f"Loaded masks from cache: {masks_cache_file}")
         return human_masks, obj_masks
 
-    def _detect_interaction(self, obj_poses_incam, images_path, human_masks, obj_masks):
-        """Detect interaction start/end frame."""
+    def _detect_interaction(self, video_id, obj_poses_incam, images_path, human_masks, obj_masks):
+        """Detect interaction start/end frame.
+
+        For a static object there is no object motion to read the onset from, so
+        detection falls back to querying a VLM about sampled keyframes. That is
+        the one step in init_data that can't be re-derived offline, so its result
+        is cacheable like the contact labels are.
+        """
+        cache_file = os.path.join(self.cache_dir, "interaction", f"{video_id}.json")
+        use_cache = "interaction" in self.cache_list
+        if use_cache and os.path.exists(cache_file):
+            self.logger.info(f"Loading interaction range from cache: {cache_file}")
+            with open(cache_file, "r") as f:
+                cached = json.load(f)
+            return (
+                cached["inter_start_idx"],
+                cached["inter_end_idx"],
+                cached["is_static_obj"] or self.cfg.get("is_static_obj", False),
+            )
+
         has_interaction_end = self.cfg.get("has_interaction_end", False)
         if self.cfg.get("detect_interaction_with_mask", False):
             self.logger.info("Using mask-based interaction detection")
@@ -298,6 +316,20 @@ class HOIOptimizer:
         self.logger.info(f"Interaction start frame: {inter_start_idx}/{len(images_path)}")
         self.logger.info(f"Interaction end frame: {inter_end_idx}/{len(images_path)}")
         self.logger.info(f"Is static object: {is_static_obj}")
+
+        if use_cache:
+            os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+            with open(cache_file, "w") as f:
+                json.dump(
+                    {
+                        "inter_start_idx": int(inter_start_idx),
+                        "inter_end_idx": int(inter_end_idx),
+                        "is_static_obj": bool(is_static_obj),
+                    },
+                    f,
+                    indent=2,
+                )
+
         return inter_start_idx, inter_end_idx, is_static_obj
 
     def _load_motion(
@@ -385,14 +417,7 @@ class HOIOptimizer:
         interval = self.cfg.get("contact_interval_length", 8)
         cache_file = os.path.join(self.cache_dir, "contact_labels", f"{video_id}.json")
 
-        # skip VLM contact detection for static objects (e.g. stairs)
-        # since the contact loss is zeroed out for them anyway.
-        if is_static_obj:
-            contact_labels = []
-            interval = []
-            start_idx = inter_start_idx
-            self.logger.info("Skipping contact label detection (is_static_obj=True)")
-        elif "contact_labels" in self.cache_list and os.path.exists(cache_file):
+        if "contact_labels" in self.cache_list and os.path.exists(cache_file):
             self.logger.info(f"Loading contact labels from cache: {cache_file}")
             with open(cache_file, "r") as f:
                 cache_data = json.load(f)

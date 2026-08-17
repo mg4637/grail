@@ -259,3 +259,8 @@ out/
 models/
 wandb/
 logs_rl/
+
+# Local-only clutter on this workstation
+.idea/
+dryrun_results*/
+SMPL_python_v.1.1.0/

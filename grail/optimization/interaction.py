@@ -65,7 +65,12 @@ def identify_interaction_start_end(
     if inter_start_idx is None:
         num_keyframe = 8
         interval = T // num_keyframe
-        for i in range(T - interval, -1, -interval):
+        # Check keyframes earliest-first and take the first confirmed contact —
+        # scanning from the end and stopping at the first hit finds only *a*
+        # frame with contact, not the true onset, which silently drops the
+        # start of the interaction (e.g. a climb-up push) from all contact
+        # supervision.
+        for i in range(T - interval, -1, -interval)[::-1]:
             image_path = image_list[i]
             is_interacting = detect_interaction(image_path, obj_name)
             if is_interacting:

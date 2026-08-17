@@ -118,8 +118,13 @@ src = hf_hub_download(
     repo_type="dataset",
 )
 dst = "$local_path"
+# hf_hub_download() with the default cache layout returns a symlink into
+# the cache's blobs/ dir; its relative-path text is only valid at the
+# cache's own depth, so os.link()-ing the symlink itself (instead of its
+# resolved target) produces a broken symlink once placed under imports/.
+src = os.path.realpath(src)
 os.makedirs(os.path.dirname(dst), exist_ok=True)
-if os.path.exists(dst):
+if os.path.lexists(dst):
     os.remove(dst)
 try:
     os.link(src, dst)

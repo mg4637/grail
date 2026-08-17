@@ -17,6 +17,42 @@ import torch
 
 _GEM_SMPL_ROOT = os.path.join(os.path.dirname(__file__), "..", "..", "imports", "GEM-SMPL")
 
+# Presence of this key in a cached prediction means the left/right keypoint
+# repair had already been applied when that prediction was produced.
+_LR_FIX_MARKER = "lr_swap_repaired"
+
+
+def _repair_lr_swaps(vitpose_path, hmr4d_results_path):
+    """Repair left/right label swaps in the cached ViTPose keypoints.
+
+    ViTPose labels left/right per frame with no temporal consistency, so in
+    side views it can swap the two legs mid-clip and stay swapped.  GENMO fits
+    the body to these keypoints, so the swap becomes a leg that teleports back
+    and forth — the reconstruction twitches, and the exported motion has the
+    wrong leg leading.  Repairing the keypoints here, before `load_data_dict`
+    reads them, means the 3D fit never sees the swap in the first place.
+
+    Any existing GENMO result is discarded when the keypoints change, since it
+    was fitted to the uncorrected ones.
+    """
+    from grail.pose_est.keypoint_flip import fix_lr_swaps
+
+    if not os.path.exists(vitpose_path):
+        return
+
+    cached = torch.load(vitpose_path, map_location="cpu")
+    # run_preprocess writes either a bare tensor or a (keypoints, meta) tuple.
+    keypoints = cached[0] if isinstance(cached, tuple) else cached
+    fixed, flips = fix_lr_swaps(keypoints)
+
+    if not any(flips.values()):
+        return
+
+    print(f"[GEM-SMPL] Repaired left/right keypoint swaps at frames {flips}")
+    torch.save((fixed, *cached[1:]) if isinstance(cached, tuple) else fixed, vitpose_path)
+    if os.path.exists(hmr4d_results_path):
+        os.remove(hmr4d_results_path)
+
 
 def _setup_imports():
     """Add GEM-SMPL demo to sys.path and mock problematic modules."""
@@ -67,11 +103,16 @@ def infer_human_pose(video_path, cache_dir, is_static_cam=False, verbose=False):
     output_root_abs = os.path.dirname(output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
-    # Check for cached results
+    # Check for cached results. Results written before the left/right keypoint
+    # repair existed carry no marker and are recomputed rather than reused —
+    # they may contain a swapped-leg fit (see _repair_lr_swaps).
     cached_results = os.path.join(output_dir, "gem_smpl_pred.pt")
     if os.path.exists(cached_results):
-        print(f"[GEM-SMPL] Loading cached results from {cached_results}")
-        return torch.load(cached_results, map_location="cpu")
+        cached = torch.load(cached_results, map_location="cpu")
+        if cached.get(_LR_FIX_MARKER):
+            print(f"[GEM-SMPL] Loading cached results from {cached_results}")
+            return cached
+        print(f"[GEM-SMPL] Ignoring pre-L/R-repair cache at {cached_results}")
 
     t0 = time.time()
     video_path_abs = os.path.abspath(video_path)
@@ -139,6 +180,9 @@ def infer_human_pose(video_path, cache_dir, is_static_cam=False, verbose=False):
         # Preprocess (bbx tracking, vitpose, vit features, VIMO, optionally DROID-SLAM)
         run_preprocess(cfg, orig_fps)
 
+        # Must run before load_data_dict — it rewrites the keypoints on disk.
+        _repair_lr_swaps(paths.vitpose, paths.hmr4d_results)
+
         # Load preprocessed data
         data = load_data_dict(cfg)
 
@@ -171,7 +215,14 @@ def infer_human_pose(video_path, cache_dir, is_static_cam=False, verbose=False):
         "smpl_params_incam": pred.get("smpl_params_incam", {}),
         "vitpose": pred.get("vitpose", vitpose),
         "foot_contact_probs": pred.get("foot_contact_probs", None),
+        # The keypoints on disk were repaired before the fit; this is a no-op
+        # unless HMR4D returned keypoints of its own.
+        _LR_FIX_MARKER: True,
     }
+    if result["vitpose"] is not None:
+        from grail.pose_est.keypoint_flip import fix_lr_swaps
+
+        result["vitpose"], _ = fix_lr_swaps(result["vitpose"])
 
     # Extract foot contact probs if not already in pred
     if result["foot_contact_probs"] is None:
