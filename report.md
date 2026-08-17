@@ -370,29 +370,47 @@ Corrections made along the way, recorded honestly: an initial "eval is healthy" 
 
 ## 8. Recommended next steps
 
-> **This section supersedes an earlier draft** which said the fix was "upstream, not
-> more compute" and recommended lowering the table first. That was based on a
-> height comparison against the stairs prior. The measured cause (§4.4) is the
-> reference's vertical *speed* against a four-frame tolerance, and the cheapest
-> fix is neither upstream nor more compute — it is one config flag.
+> **Revised twice.** The first draft blamed table height and was superseded by the
+> timing analysis in §4.4. This ordering then changed again after the rollout was
+> replayed correctly (§5 — the first replay had the joint order wrong). Seeing the
+> real motion showed the robot is not performing the right climb slightly late; it
+> is belly-flopping its torso onto the table, which is what maximises pelvis height
+> for a policy scored only on the first two thirds. That reframes the problem as
+> **exposure**, not pace, and reorders what to try.
 
-Ordered cheapest-first:
-
-1. **Retime the motion — `motion_fps_scale=0.5`.** One Hydra override, no code
+1. **Termination curriculum — loosen for training, restore for evaluation.**
+   Because every episode dies at progress 0.644, the policy has never
+   experienced the last 36% of the motion, so it cannot learn the stand-up. Phase
+   1 relaxes the thresholds to 0.35 / 0.35 / 0.5 so the robot reaches the end and
+   gets gradient signal there; phase 2 restores 0.15 / 0.15 / 0.2 and refines a
+   motion whose shape it now knows. **Evaluation always runs at the shipped
+   thresholds**, so this is curriculum learning, not goalpost-moving.
+   `data/stage4_train_curriculum.sh`, ~9 h unattended. **Try this first.**
+2. **Retime the motion — `motion_fps_scale=0.5`.** One Hydra override, no code
    change, no re-retargeting. Halves the peak climb rate to 0.45 m/s and doubles
-   the lag budget to 0.336 s, directly attacking the measured failure mode.
-   Warm-start from the existing `last.pt` into a **new** experiment directory.
-   Cost: ~6 h unattended. **Try this first.**
-2. **Lower the table geometry.** A real fix, but it needs a Stage 2 and Stage 3
-   re-run to regenerate the reconstruction and the retargeted reference.
+   the lag budget to 0.336 s. Still worth trying, but demoted: the retiming
+   argument assumed the robot was rushing a motion it knew, and the corrected
+   replay shows it has never been shown the ending.
+   `data/stage4_train_slow.sh`, ~6 h.
 3. **Split the clips.** Table into approach + mount; chair into carry
-   (→ `pnp_*`) and climb (→ `terrain`). Most work by far, and the only route
-   that makes the chair usable at all.
+   (→ `pnp_*`) and climb (→ `terrain`). Most work by far, the only route that
+   makes the chair usable at all — and the right answer if 1 and 2 raise
+   `progress` while leaving `mpjpe` near 100 mm, which would mean the curriculum
+   bought reach rather than quality.
+4. **Lower the table geometry.** A real fix, but it needs a Stage 2 and Stage 3
+   re-run to regenerate the reconstruction and the retargeted reference.
 
-**Not recommended:** loosening the termination thresholds (§4.4 — goalpost-moving,
-not a fix), and another 6000 iterations at the current settings (reward had
-plateaued at 5.3–5.5 for the last ~1500 iterations, so more of the same buys
-little).
+**Change one thing at a time.** Options 1 and 2 compose, but run together they
+leave you unable to attribute the result.
+
+**Still not recommended:** loosening the thresholds *at evaluation* — that removes
+the detector rather than the defect, and `export_successful_rollouts` feeds
+Stage 5, so a motion passing a widened gate becomes a bad motion on hardware.
+Also not recommended: another 6000 iterations at the current settings (reward had
+plateaued at 5.3–5.5 for the last ~1500 iterations).
+
+**Read `mpjpe` alongside `progress`.** The 0.644 run hit its height target while
+flopping, at 114 mm mean joint error. A high-enough pelvis is not a climb.
 
 Only once `progress = 1.0` can the Stage 4 deliverable be produced:
 
@@ -411,13 +429,19 @@ them elsewhere.
 
 | script | what it does |
 |---|---|
-| `data/stage4_train_slow.sh` | warm-start finetune at `motion_fps_scale=0.5`, 6000 iters, 2048 envs, writes to `data/stage4_train/table_slow/` |
-| `data/stage4_post_train_eval_slow.sh` | waits for that trainer to exit, then evaluates **at the same 0.5 scale** into `data/stage4_eval/table_slow/` |
+| `data/stage4_train_curriculum.sh` | **option 1.** Phase 1 loose (0.35/0.35/0.5, 3000 iters) → diagnostic eval → phase 2 shipped thresholds (6000 iters). Both phases in one process, so they never contend for the GPU. ~9 h |
+| `data/stage4_post_train_eval_curriculum.sh` | evaluates phase 2 **at the shipped 0.15/0.15/0.2** — thresholds deliberately not overridden |
+| `data/stage4_train_slow.sh` | **option 2.** warm-start finetune at `motion_fps_scale=0.5`, 6000 iters, → `data/stage4_train/table_slow/`. ~6 h |
+| `data/stage4_post_train_eval_slow.sh` | evaluates it **at the same 0.5 scale** — a policy trained on the half-speed reference must be scored on it |
 
 ```bash
 docker start grail_dev
 
-# launch detached, so both survive logoff
+# option 1 — termination curriculum (recommended first)
+docker exec -d grail_dev bash /workspace/grail/data/stage4_train_curriculum.sh
+docker exec -d grail_dev bash /workspace/grail/data/stage4_post_train_eval_curriculum.sh
+
+# option 2 — retiming. Run this INSTEAD, not alongside: one change at a time.
 docker exec -d grail_dev bash /workspace/grail/data/stage4_train_slow.sh
 docker exec -d grail_dev bash /workspace/grail/data/stage4_post_train_eval_slow.sh
 
