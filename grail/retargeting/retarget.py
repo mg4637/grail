@@ -559,9 +559,14 @@ def load_hoi_sequence(
 
         smplx_data_frames.append(result)
 
-    # hard code the height scale to 1.0 for now
-    height_scale = 1.0  # float(robot_height / human_height)
-    height_scale *= scene_scale
+    # `scene_scale` scales the whole world uniformly - target joints and object
+    # together. NOTE: scaling the root path while KEEPING bone offsets does not
+    # work; that is a per-frame rigid translation of the entire IK problem, so it
+    # leaves every joint angle identical and merely sinks the robot through the
+    # floor (measured: S=0.9 puts the feet at -0.088 m with byte-identical dofs).
+    # A fixed-size robot cannot be given an easier climb by rescaling the
+    # reference - the scene itself has to change.
+    height_scale = float(scene_scale)
     print(f"height_scale: {height_scale}")
 
     mesh_file = Path(file_path).parent.parent / "mesh_data" / "model.obj"
@@ -573,10 +578,8 @@ def load_hoi_sequence(
 
     for curr_frame in range(len(global_orient)):
         for joint_name in joint_names:
-            smplx_data_frames[curr_frame][joint_name] = (
-                smplx_data_frames[curr_frame][joint_name][0] * height_scale,
-                smplx_data_frames[curr_frame][joint_name][1],
-            )
+            pos, rot = smplx_data_frames[curr_frame][joint_name]
+            smplx_data_frames[curr_frame][joint_name] = (pos * height_scale, rot)
 
     object_transl *= height_scale
 
@@ -1409,6 +1412,10 @@ def retarget_single_sequence(
                 frames[f"{hand}_wrist"] = (all_joint_positions_mean - x_axis * 0.1, rotation)
 
             retarget.configuration.data.qpos[:3] = transl[frame]
+            # Refresh FK after writing the root directly into the MuJoCo buffer.
+            # Without this the first solve of each frame scores its tasks against
+            # the previous frame's body positions.
+            retarget.configuration.update()
             qpos = retarget.retarget(frames)
 
         # Visualize
@@ -1586,6 +1593,12 @@ def retarget_single_sequence(
         object_mesh_path = Path(result["obj_data"][object_name]["file_path"])
         output_usd_path = str(Path(output_dir_mesh) / f"{seq_name}.usd")
 
+        # The retargeted motion was solved against a world scaled by
+        # `height_scale` (see load_hoi_sequence), so the exported USD must carry
+        # the same factor or the robot will track a table that is not the one it
+        # collides with.
+        usd_scale = float(mesh_scale) * float(result.get("height_scale", 1.0))
+
         with tempfile.TemporaryDirectory() as tmp_dir:
             patched_obj = prepare_unique_mesh(object_mesh_path, seq_name, Path(tmp_dir))
             cmd = [
@@ -1597,7 +1610,7 @@ def retarget_single_sequence(
                 "--mass",
                 "1.0",
                 "--scale",
-                str(mesh_scale),
+                str(usd_scale),
                 "--collision-approximation",
                 "meshSimplification",
             ]

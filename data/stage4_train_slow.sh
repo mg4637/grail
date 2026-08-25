@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+# ############################################################################
+# DO NOT RUN. Superseded by data/stage4_train_v3.sh.
+#
+# It sets motion_fps_scale, which is BROKEN. It rescales only metadata
+# (motion_lib_base.py:1463-1467) while playback still advances one frame per sim
+# step, and at 0.5 it makes the sampler draw start frames past the end of the
+# array while tracking_time_out keeps using the unscaled count. Retiming belongs
+# in Stage 3, via retarget.py --fps, where fk_batch genuinely interpolates.
+#
+# The real defect was upstream, in the retargeted reference; see the header of
+# data/stage4_train_v3.sh. Kept for the record only.
+# ############################################################################
 # Stage 4 table finetune, retried at HALF the reference playback speed.
 #
 # Why: the 6000-iteration run in data/stage4_train/table reached progress 0.644

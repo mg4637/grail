@@ -1,0 +1,186 @@
+# @package _global_
+# GRAIL scene terrain-tracking config for the table climb.
+#
+# terrain_tracking.yaml with five changes, each traced to a measurement on the
+# failing rollout. Everything else - including the shipped 0.15/0.15/0.20
+# termination thresholds - is left exactly as released, so the Stage 5 export
+# gate stays honest.
+#
+#   1. tracking_vr_5point_local.params.std  0.1 -> 0.25
+#      exp(-err^2/std^2) with std=0.1 is 0.018 at 20 cm of error and flat past
+#      ~25 cm. The whole mount happens at that scale, so the term that is
+#      supposed to shape it carries no gradient exactly where it is needed.
+#      At std=0.25 the same 20 cm error scores 0.53.
+#
+#   2. is_terminated at -10
+#      base_5point_local_feet_acc has no alive bonus and no termination penalty.
+#      The 7 tracking terms cap at +7 while the penalties are unbounded below,
+#      and termination truncates the return with no bootstrap
+#      (ppo_trainer.py:1009). Quitting early is therefore a competitive
+#      strategy, which is what the belly-flop rollout looks like.
+#
+#   3. undesired_contacts: allow the contacts the climb actually needs
+#      Measured on the corrected reference (grail_table_v3f), tracking it
+#      perfectly still puts right_hip_yaw_link on the table for 18 frames,
+#      left_wrist_pitch_link for 8, and a knee or an ankle_pitch for 1 each.
+#      The shipped regex penalises all of them, so the reference is punished for
+#      being itself. Hands, elbows and ankle rolls were already exempt.
+#
+#   4. physics_material on, at a narrowed range
+#      Training at a fixed 1.0/1.0 friction produces a policy tuned to one
+#      friction value, and the observed failure is a slip. The shipped range is
+#      [0.3, 1.6] static; a third of those envs cannot be climbed at all, so
+#      this uses [0.7, 1.3] - robustness without making the task unlearnable.
+#      push_robot and the wrist-mass randomisation stay off: a 0.5 m/s shove
+#      mid-mount is not the robustness this task needs, and scaling wrist mass
+#      up to 5x is a manipulation-task device.
+#
+#   5. small reset noise on pose and velocity
+#      Every reset is currently bit-identical for a given start frame. A few cm
+#      and a few cm/s stop the policy memorising one trajectory.
+#
+# SONIC single-encoder with height-map + object-state observations for
+# scene/terrain-aware tracking (no depth camera). Based on sonic_single_depth_proj_terrain with:
+#   - height_map_z_flat replaces depth_image as encoder input (2D conv2d projector)
+#   - depth camera disabled (set use_height_map=True in commands.motion)
+#   - policy/critic observations include object pose + multi-future delta
+#   - aux_loss: g1_recon_only (hmap_pred dropped — trivial when hmap is an input)
+#   - plain critic (privileged MLP) instead of depth-aware critic
+
+defaults:
+  - /algo: ppo_im_phc
+  - /manager_env: base_env
+  - /callbacks/read_eval
+  - /callbacks/im_resample
+  - /aux_losses: universal_token/g1_recon_only
+  - override /trainer: trl_ppo_aux
+  - override /actor_critic: universal_token/single_mlp_hmap_proj
+  - override /manager_env/observations/tokenizer: single_token_noz_hmap_proj
+  - override /manager_env/observations/policy: local_dir_hist_obj
+  - override /manager_env/observations/critic: privileged_mf_hist_obj
+  - override /manager_env/events: tracking/level0_2
+  - override /manager_env/rewards: tracking/base_5point_local_feet_acc
+  - override /manager_env/terminations: tracking/base_adaptive_strict_ori_foot_xyz
+
+use_manager_env: true
+
+exp_base: ${hydra:runtime.choices.exp}
+exp_var: test
+experiment_name: ${exp_base}_${exp_var}
+experiment_dir: ${base_dir}/${project_name}/${experiment_name}-${timestamp}
+
+num_envs: 4096
+project_name: TRL_G1_Track
+
+actor_prop_history_length: 10
+actor_actions_history_length: 10
+critic_prop_history_length: 10
+critic_actions_history_length: 10
+
+manager_env:
+  config:
+    safe_nan: true
+    robot:
+      type: g1_model_12
+    terrain_type: plane
+    add_object: true
+    env_spacing: 10.0
+    # Terrain data: auto-discover from folder (robot/, object_usd/, objects/)
+    terrain_motion_dir: null
+    # Terrain data: legacy txt list files (used when terrain_motion_dir is null)
+    terrain_usd_path: null
+    terrain_motion_keys_path: null
+    # Flat data: auto-discover from folder
+    flat_motion_dir: null
+    # Flat data: legacy txt list file (used when flat_motion_dir is null)
+    flat_motion_keys_path: null
+    # Flat placeholder USD (required for flat envs)
+    flat_usd_path: null
+    flat_to_terrain_ratio: 0
+    # No depth camera — height map is used instead.
+    enable_depth_camera: false
+  commands:
+    motion:
+      use_height_map: true
+      reward_point_body: ["torso_link", "left_wrist_yaw_link", "right_wrist_yaw_link", "left_ankle_roll_link", "right_ankle_roll_link"]
+      reward_point_body_offset: [[0.0, 0.0, 0.5], [0.0, -0.0, 0.0], [0.0, -0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+      num_future_frames: 10
+      dt_future_ref_frames: 0.1
+      smpl_num_future_frames: 10
+      smpl_dt_future_ref_frames: 0.02
+      cat_upper_body_poses: true
+      cat_upper_body_poses_prob: 0.5
+      terrain_aware_sampling: false
+      flat_to_terrain_ratio: 0
+      use_paired_motions: true
+      init_z_offset: 0.05
+      pose_range:
+        x: [-0.02, 0.02]
+        y: [-0.02, 0.02]
+        z: [-0.01, 0.01]
+        roll: [-0.05, 0.05]
+        pitch: [-0.05, 0.05]
+        yaw: [-0.05, 0.05]
+      velocity_range:
+        x: [-0.1, 0.1]
+        y: [-0.1, 0.1]
+        z: [-0.1, 0.1]
+        roll: [-0.1, 0.1]
+        pitch: [-0.1, 0.1]
+        yaw: [-0.1, 0.1]
+      joint_position_range: [-0.02, 0.02]
+      joint_velocity_range: [-0.1, 0.1]
+      motion_lib_cfg:
+        upper_body_augment_prefixes: [
+          "2025", "sonic_mixed_walking_running", "sonic_squating_different_height_switching",
+          "sonic_running", "sonic_walking", "sonic_squating_different_height_hold", "sonic_walking_other_style",
+          "balance",
+        ]
+        adaptive_sampling:
+          adp_samp_failure_rate_max_over_mean: 200
+          enable: false
+        motion_file: data/combined_bones_18399_0901_filtered.pkl
+        smpl_motion_file: dummy
+        smpl_y_up: true
+  rewards:
+    tracking_vr_5point_local:
+      params:
+        std: 0.25
+    is_terminated:
+      _target_: isaaclab.managers.RewardTermCfg
+      func: isaaclab.envs.mdp:is_terminated
+      weight: -10.0
+    undesired_contacts:
+      params:
+        sensor_cfg:
+          body_names:
+            - "^(?!left_ankle_roll_link$)(?!right_ankle_roll_link$)(?!left_wrist_yaw_link$)(?!right_wrist_yaw_link$)(?!left_elbow_link$)(?!right_elbow_link$)(?!left_wrist_pitch_link$)(?!right_wrist_pitch_link$)(?!left_knee_link$)(?!right_knee_link$)(?!left_hip_yaw_link$)(?!right_hip_yaw_link$)(?!left_ankle_pitch_link$)(?!right_ankle_pitch_link$).+$"
+  events:
+    push_robot: null
+    add_joint_default_pos: null
+    base_com: null
+    randomize_rigid_body_mass: null
+    physics_material:
+      params:
+        static_friction_range: [0.7, 1.3]
+        dynamic_friction_range: [0.6, 1.1]
+        restitution_range: [0.0, 0.2]
+  observations:
+    policy:
+      enable_corruption: false
+    tokenizer:
+      enable_corruption: false
+
+algo:
+  config:
+    empty_cache_every_n_ppo_epoch: -1
+    num_steps_per_env: 24
+    use_clampped_std: true
+    std_clamp_min: 0.001
+    std_clamp_max: 0.5
+    max_grad_norm: 0.1
+    num_learning_iterations: 30000
+
+callbacks:
+  model_save:
+    save_frequency: 500

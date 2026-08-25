@@ -1,4 +1,19 @@
 #!/usr/bin/env bash
+# ############################################################################
+# DO NOT RUN. Superseded by data/stage4_train_v3.sh.
+#
+# This script rests on a diagnosis that is false: "the policy never experiences
+# the last 36% of the motion, because every episode terminates at ~64%".
+# terrain_tracking has reference-state initialization on by default -
+# use_paired_motions: true selects the branch at commands.py:3204-3210, which
+# draws a UNIFORM RANDOM START FRAME over the whole clip (motion_lib_base.py:
+# 2353-2367). The policy has trained on the stand-up from the first iteration.
+# That is why loosening the thresholds, and then disabling them, changed
+# nothing. Relaxing them further only removes the detector.
+#
+# The real defect was upstream, in the retargeted reference; see the header of
+# data/stage4_train_v3.sh. Kept for the record only.
+# ############################################################################
 # Stage 4 table climb, two-phase termination curriculum.
 #
 # WHY THIS EXISTS
