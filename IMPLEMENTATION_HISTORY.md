@@ -565,8 +565,52 @@ Worth noting the training metrics look *excellent* in isolation — near-zero te
 the return, every tracking term up. Read alone they would have been reported as a success. The
 eval is what exposed it.
 
-**Recommended next step, not yet run:** re-train on `grail_table_v5` with `tracking_feet_pos`
-either removed entirely (isolating B, which is the clean A/B against `table_v3ref`'s 0.772) or
-gated to the mount phase so it cannot be farmed while walking on flat ground. Keeping B and
-dropping D is the first thing to try, since B is verified reference geometry and D is the
-change with a measured mechanism for the regression.
+### STOP RETRAINING. The retrain-and-see loop is not producing progress.
+
+The first instinct after this result was to recommend another ~6 h run with `tracking_feet_pos`
+removed. That recommendation is withdrawn, because the record does not support the belief that
+another run gets us closer:
+
+| run | what was changed | progress |
+|---|---|---|
+| `table_ft` | the original finetune | 0.644 |
+| `table_v3` | corrected reference (v3f) + 5 reward/config changes | 0.604 |
+| `table_v3ref` | same policy, evaluated on the matched reference | 0.772 |
+| `table_v5` | flat-palm reference + feet-only reward | 0.280 |
+
+Four multi-hour runs, no monotone improvement, and the single best number (0.772) came not from
+a training change at all but from **evaluating an existing policy against a matched reference**.
+Every training run in this table changed more than one thing at once, so none of them is a clean
+experiment, and the one apparent gain is not attributable to any training intervention.
+
+**Why another run would be blind.** We still cannot answer, for this task, the question that
+decides everything: *is the G1 physically able to perform this climb at all, under SONIC's
+actuator limits, from a standing start, with contact forces that a friction cone can supply?*
+Everything measured so far has been about the reference's geometry (penetration, palm
+orientation, foot planting) or about reward bookkeeping. Neither establishes feasibility. The
+one test that came closest — `stage3_mujoco_feasibility.py --pin_base` — pins the root to the
+reference path, which assumes away the balance problem that is the actual difficulty.
+
+**What has to be established before any further GPU time is spent:**
+
+1. **Feasibility with a free base.** Drive the reference in MuJoCo with the root *unpinned* and
+   SONIC's gains/effort limits. If the robot cannot hold the mount even when handed the exact
+   reference trajectory, no reward function and no amount of PPO will find it, and every run in
+   the table above was doomed before it started.
+2. **A contact-force check at the mount.** Whether the first 6 rows of the floating-base EoM can
+   be supplied by push-only, friction-bounded contacts at the frames where the robot is on one
+   foot and both hands (f47-77). This was done for the chair clip and never for this one.
+3. **Whether the task is reachable from a standing start**, given the arm-reach limit already
+   measured (0.284 m arm, shoulder 0.43-0.59 m above the tabletop from f70). The child mounts
+   using hands on the table through the stand-up; the robot demonstrably cannot. That may mean
+   the motion needs to be *re-planned for the robot's proportions* rather than retargeted from
+   the child at all - which is a Stage 3 redesign, not a Stage 4 tuning problem.
+
+Only if (1) and (2) come back positive is another training run worth its cost, and then it must
+change **one** thing.
+
+**Also worth recording as a process failure, not just a technical one.** The v5 run changed the
+reference *and* added a reward term in the same experiment. When it regressed, separating the
+two took a post-hoc FK comparison of the references; had they differed materially, the run would
+have been uninterpretable and the six hours wasted outright. The habit of bundling changes is
+what has made four runs yield no attributable progress.
