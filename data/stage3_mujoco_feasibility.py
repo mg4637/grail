@@ -54,26 +54,62 @@ def gains_for(name):
     return best[1], best[2], best[3]
 
 
-def build_scene(obj_pkl):
-    """G1 MJCF + the table, as 15 convex mesh geoms at the reference object pose."""
+def build_scene(obj_pkl, mesh_path=None, mocap=False, static_props=None, split=True,
+                extra_dynamic=None):
+    """G1 MJCF plus the scene object, as convex mesh geoms.
+
+    mesh_path    which mesh the object is. Defaults to the table clip's, which is
+                 what the table-era callers expect.
+    mocap        False bakes the object at its FIRST-FRAME pose, which is right
+                 for a static prop like the table. A carried object moves - the
+                 chair travels 1.96 m - so pass True to get a mocap body whose
+                 pose is driven per frame via d.mocap_pos / d.mocap_quat, with
+                 the geoms left in the object's LOCAL frame.
+    static_props fixed world geometry. Either a list of OBJ paths, or of
+                 (path, [x, y, z]) pairs. data/stage3_static_props.py bakes
+                 scale and rotation into the mesh but keeps TRANSLATION separate,
+                 because SONIC's `add_table` takes the position as config - so
+                 pass the position here or the prop lands at the origin.
+    extra_dynamic additional carried objects, as (mesh_path, initial_pos) pairs.
+                 Each becomes its own mocap body, so a scene can hold more than
+                 one moving object - the chair AND the basket. mocap index 0 is
+                 the primary object; extras follow in order.
+    split        The table mesh splits into 15 solid components, so per-part
+                 convex hulls approximate it well (7% added volume, measured).
+                 The chair does NOT: `split` breaks it into 56 individual flat
+                 polygons, and MuJoCo refuses a coplanar mesh ("cannot compute
+                 convex hull"). Pass split=False to keep it whole - MuJoCo
+                 renders the real triangles and only uses the hull for
+                 collision, so the render is faithful even though the collision
+                 volume becomes a filled hull.
+    """
     O = list(joblib.load(obj_pkl).values())[0]
     pos = np.array(O["root_pos"])[0, 0]
     quat = np.array(O["root_quat"])[0, 0]              # wxyz
-    mesh = trimesh.load(MESH_OBJ)
+    mesh = trimesh.load(mesh_path or MESH_OBJ)
     if isinstance(mesh, trimesh.Scene):
         mesh = mesh.dump(concatenate=True)
+    sc = np.asarray(O.get("scale", 1.0)).reshape(-1)
+    mesh.vertices = np.asarray(mesh.vertices) * (sc[:3] if sc.size >= 3 else float(sc[0]))
     Rm = R.from_quat(quat[[1, 2, 3, 0]]).as_matrix()
-    parts = mesh.split(only_watertight=False)
+    parts = mesh.split(only_watertight=False) if split else [mesh]
+    parts = [p for p in parts
+             if (np.asarray(p.vertices).max(0) - np.asarray(p.vertices).min(0)).min() > 1e-6]
 
     tmpdir = tempfile.mkdtemp(prefix="g1_feas_")
     tree = ET.parse(G1_MJCF)
     root = tree.getroot()
     asset = root.findall("asset")[0]
     world = root.findall("worldbody")[-1]
-    table = ET.SubElement(world, "body", {"name": "table", "pos": "0 0 0"})
+    attrs = {"name": "table", "pos": "0 0 0"}
+    if mocap:
+        attrs["mocap"] = "true"
+        attrs["pos"] = " ".join(f"{v:.6f}" for v in pos)
+    table = ET.SubElement(world, "body", attrs)
     for i, p in enumerate(parts):
         p = p.copy()
-        p.vertices = p.vertices @ Rm.T + pos           # bake the pose into the mesh
+        if not mocap:
+            p.vertices = p.vertices @ Rm.T + pos       # bake the pose into the mesh
         f = os.path.join(tmpdir, f"table_{i}.obj")
         p.export(f)
         ET.SubElement(asset, "mesh", {"name": f"table_{i}", "file": f})
@@ -89,6 +125,42 @@ def build_scene(obj_pkl):
         g = ET.SubElement(vis, "global")
     g.set("offwidth", "1920")
     g.set("offheight", "1080")
+
+    for j, prop in enumerate(static_props or []):
+        ppos = np.zeros(3)
+        if isinstance(prop, (tuple, list)):
+            prop, ppos = prop[0], np.asarray(prop[1], dtype=float)
+        pm = trimesh.load(prop)
+        if isinstance(pm, trimesh.Scene):
+            pm = pm.dump(concatenate=True)
+        # Props are kept whole for the same reason as the chair: these meshes
+        # are flat-polygon soups, and every split part is coplanar.
+        chunks = pm.split(only_watertight=False) if split else [pm]
+        chunks = [q for q in chunks
+                  if (np.asarray(q.vertices).max(0) - np.asarray(q.vertices).min(0)).min() > 1e-6]
+        for k, q in enumerate(chunks or [pm]):
+            q = q.copy()
+            q.vertices = np.asarray(q.vertices) + ppos
+            f = os.path.join(tmpdir, f"prop_{j}_{k}.obj")
+            q.export(f)
+            ET.SubElement(asset, "mesh", {"name": f"prop_{j}_{k}", "file": f})
+            ET.SubElement(world, "geom", {"type": "mesh", "mesh": f"prop_{j}_{k}",
+                                          "rgba": "0.45 0.30 0.18 1",
+                                          "friction": "1.0 0.005 0.0001"})
+
+    for j, (epath, epos) in enumerate(extra_dynamic or []):
+        em = trimesh.load(epath)
+        if isinstance(em, trimesh.Scene):
+            em = em.dump(concatenate=True)
+        eb = ET.SubElement(world, "body", {
+            "name": f"dyn_{j}", "mocap": "true",
+            "pos": " ".join(f"{v:.6f}" for v in np.asarray(epos, dtype=float))})
+        f = os.path.join(tmpdir, f"dyn_{j}.obj")
+        em.export(f)
+        ET.SubElement(asset, "mesh", {"name": f"dyn_{j}", "file": f})
+        ET.SubElement(eb, "geom", {"type": "mesh", "mesh": f"dyn_{j}",
+                                   "rgba": "0.55 0.38 0.22 1",
+                                   "friction": "1.0 0.005 0.0001"})
 
     out = os.path.join(tmpdir, "scene.xml")
     # keep meshdir working: compiler path is relative to the ORIGINAL xml

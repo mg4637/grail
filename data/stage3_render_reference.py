@@ -30,7 +30,24 @@ _feas = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_feas)
 
 
-def load(spec, scene_dir=None):
+def _scene_for(motion_dir, mesh_path, props, mocap, split=True, extra=None):
+    return _feas.build_scene(glob.glob(f"{motion_dir}/objects/*.pkl")[0],
+                             mesh_path=mesh_path, mocap=mocap, static_props=props,
+                             split=split, extra_dynamic=extra)
+
+
+def _pick(paths, key):
+    """Choose the pkl holding `key`; a split library has one file per motion."""
+    if key is None:
+        return paths[0]
+    for p in paths:
+        if key in joblib.load(p):
+            return p
+    raise SystemExit(f"motion key {key!r} not found in {paths}")
+
+
+def load(spec, scene_dir=None, mesh_path=None, props=None, mocap=False, split=True,
+         extra_pkls=None, key=None):
     """`spec` is a motion_lib dir, or `traj:<path>.trajectory.pkl` from a SONIC
     eval. Trajectory pkls carry no scene, so they borrow `scene_dir`'s table -
     which is correct, since the policy was rolled out in exactly that scene."""
@@ -38,19 +55,32 @@ def load(spec, scene_dir=None):
         import pickle
         with open(spec[5:], "rb") as fh:
             T = pickle.load(fh)
-        m = mujoco.MjModel.from_xml_path(
-            _feas.build_scene(glob.glob(f"{scene_dir}/objects/*.pkl")[0]))
+        m = mujoco.MjModel.from_xml_path(_scene_for(scene_dir, mesh_path, props, mocap, split))
         assert T.get("quat_format", "wxyz") == "wxyz", T.get("quat_format")
         dof = np.asarray(T["dof_pos"])[:, isaac_to_mjcf(m)]
         return (m, mujoco.MjData(m),
                 (np.asarray(T["root_pos_w"]), np.asarray(T["root_quat_w"]), dof),
-                float(T["fps"]))
-    M = list(joblib.load(glob.glob(f"{spec}/robot/*.pkl")[0]).values())[0]
+                float(T["fps"]),
+                (np.asarray(T["object_pos_w"]), np.asarray(T["object_quat_w"]))
+                if mocap and T.get("object_pos_w") is not None else None)
+    M = joblib.load(_pick(sorted(glob.glob(f"{spec}/robot/*.pkl")), key))[key] \
+        if key else list(joblib.load(sorted(glob.glob(f"{spec}/robot/*.pkl"))[0]).values())[0]
+    extras, extra_specs = [], []
+    for ep in (extra_pkls or []):
+        E = list(joblib.load(ep).values())[0]
+        p_ = np.array(E["root_pos"])[:, 0]
+        extras.append((E["mesh"], p_[0]))
+        extra_specs.append((p_, np.array(E["root_quat"])[:, 0]))
+    opkl = _pick(sorted(glob.glob(f"{spec}/objects/*.pkl")), key)
     m = mujoco.MjModel.from_xml_path(
-        _feas.build_scene(glob.glob(f"{spec}/objects/*.pkl")[0]))
-    return m, mujoco.MjData(m), (np.array(M["root_trans_offset"]),
-                                 np.array(M["root_rot"]),
-                                 np.array(M["dof"])), float(M["fps"])
+        _feas.build_scene(opkl, mesh_path=mesh_path, mocap=mocap,
+                          static_props=props, split=split, extra_dynamic=extras))
+    O = joblib.load(opkl)[key] if key else list(joblib.load(opkl).values())[0]
+    obj = ([np.array(O["root_pos"])[:, 0]] + [e[0] for e in extra_specs],
+           [np.array(O["root_quat"])[:, 0]] + [e[1] for e in extra_specs]) if mocap else None
+    return (m, mujoco.MjData(m), (np.array(M["root_trans_offset"]),
+                                  np.array(M["root_rot"]),
+                                  np.array(M["dof"])), float(M["fps"]), obj)
 
 
 # IsaacLab's articulation joint order for the G1 (g1_29dof_textured.usd), dumped
@@ -130,6 +160,25 @@ def main():
                          "cutting every panel to the shortest. Use this when a "
                          "policy rollout terminated early - cutting would hide "
                          "the very truncation you want to see.")
+    ap.add_argument("--mesh", default=None, help="object mesh (defaults to the table's)")
+    ap.add_argument("--props", nargs="*", default=None,
+                    help="baked static prop OBJs to add as fixed world geometry")
+    ap.add_argument("--props_only", nargs="*", default=None,
+                    help="restrict --props_json to these prop names (e.g. keep "
+                         "the bookshelf static while the basket is carried)")
+    ap.add_argument("--props_json", default=None,
+                    help="static_props.json from stage3_static_props.py - carries "
+                         "each prop's position, which the baked OBJ does not")
+    ap.add_argument("--key", default=None,
+                    help="motion key to render from a multi-motion library")
+    ap.add_argument("--no_split", action="store_true",
+                    help="keep the object mesh whole instead of splitting it into "
+                         "components (required for meshes made of flat polygons)")
+    ap.add_argument("--extra_objects", nargs="*", default=None,
+                    help="additional carried-object pkls (e.g. objects_basket/*.pkl)")
+    ap.add_argument("--moving_object", action="store_true",
+                    help="drive the object per frame instead of freezing it at "
+                         "frame 0 - required for a carried object")
     ap.add_argument("--track_panel", type=int, default=0,
                     help="which panel's motion the shared camera follows")
     ap.add_argument("--fixed_lookat", type=float, nargs=3, default=None,
@@ -139,7 +188,14 @@ def main():
                          "they diverge, which is the moment you want to compare.")
     a = ap.parse_args()
 
-    scenes = [load(d, a.scene_dir) for d in a.motion_dirs]
+    props = a.props
+    if a.props_json:
+        import json
+        allp = json.load(open(a.props_json))
+        props = [(v["obj"], v["pos"]) for k, v in allp.items()
+                 if not a.props_only or k in a.props_only]
+    scenes = [load(d, a.scene_dir, a.mesh, props, a.moving_object, not a.no_split,
+                   a.extra_objects, a.key) for d in a.motion_dirs]
     names = a.labels or [os.path.basename(d.rstrip("/")).replace("traj:", "")
                          for d in a.motion_dirs]
     lens = [len(s[2][0]) for s in scenes]
@@ -154,14 +210,19 @@ def main():
     cam.azimuth, cam.elevation, cam.distance = a.azimuth, a.elevation, a.distance
 
     frames = []
-    renderers = [mujoco.Renderer(m, a.height, a.width) for m, _, _, _ in scenes]
+    renderers = [mujoco.Renderer(m, a.height, a.width) for m, *_ in scenes]
     for f in range(T):
         panels = []
-        for (m, d, (rt, rr, dof), fps), r, nm in zip(scenes, renderers, names):
+        for (m, d, (rt, rr, dof), fps, obj), r, nm in zip(scenes, renderers, names):
             g = min(int(round(f * fps / base_fps)), len(rt) - 1)
             if not a.pad:
                 g = min(g, T - 1)
             d.qpos[0:3], d.qpos[3:7], d.qpos[7:36] = rt[g], rr[g], dof[g]
+            if obj is not None and m.nmocap:
+                for i in range(min(m.nmocap, len(obj[0]))):
+                    gi = min(g, len(obj[0][i]) - 1)
+                    d.mocap_pos[i] = obj[0][i][gi]
+                    d.mocap_quat[i] = obj[1][i][gi]
             mujoco.mj_forward(m, d)
             if a.fixed_lookat is not None:
                 cam.lookat[:] = a.fixed_lookat

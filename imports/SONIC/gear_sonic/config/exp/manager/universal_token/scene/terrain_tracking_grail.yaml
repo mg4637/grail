@@ -150,6 +150,31 @@ manager_env:
       _target_: isaaclab.managers.RewardTermCfg
       func: isaaclab.envs.mdp:is_terminated
       weight: -10.0
+    # 6. tracking_feet_pos - a feet-only copy of the 5-point term
+    #    tracking_vr_5point_local averages all five points' squared error before
+    #    the exponential, so the feet are one fifth of one term. The diagnostic
+    #    (data/stage4_foot_placement_diagnostic.py) measured the consequence: on
+    #    the failing rollout the feet tracked to 0.024-0.027 while the wrists sat
+    #    at 0.037-0.048, so the combined term read as healthy on the very frames
+    #    where the left foot was up to 0.41 m outside the tabletop footprint and
+    #    12-19 cm below the surface. Scoring the two ankles on their own gives
+    #    foot placement its own gradient.
+    #    std=0.20 is chosen for the failure's scale: exp(-d^2/std^2) is 0.37 at
+    #    20 cm and still 0.015 at 41 cm, so there is signal across the whole
+    #    range of the observed miss. (At the shipped std=0.1 a 20 cm error scores
+    #    0.018 and 41 cm is numerically flat - no gradient where it is needed.)
+    #    No table geometry is involved: the reference's own feet land inside the
+    #    footprint, so tracking them tightly IS the edge-awareness.
+    tracking_feet_pos:
+      _target_: isaaclab.managers.RewardTermCfg
+      func: gear_sonic.envs.manager_env.mdp:tracking_local_point_subset_error
+      weight: 2.0
+      params:
+        command_name: "motion"
+        std: 0.20
+        # indices into commands.motion.reward_point_body:
+        # 0 torso, 1 L wrist, 2 R wrist, 3 L ankle_roll, 4 R ankle_roll
+        point_indices: [3, 4]
     undesired_contacts:
       params:
         sensor_cfg:

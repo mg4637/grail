@@ -1,0 +1,355 @@
+# @package _global_
+#
+# GRAIL chair task: carry a chair to a bookshelf, set it down, step up on it,
+# step down. Derived from pnp_table.yaml, which is the only released family at
+# 43 DoF (dex hands) and therefore the only one that can grip anything.
+#
+# WHY NOT terrain_tracking
+# ------------------------
+# The chair is CARRIED - it translates 1.96 m and its z goes 0.90 -> 1.28 ->
+# 0.97. Terrain tracking treats objects as static scenery, so it structurally
+# cannot follow a moving object, and its robot (g1_model_12) has no fingers at
+# all. Conversely the pnp family cannot be swapped in later: 29 vs 43 DoF is a
+# different action space, so the two cannot be chained or warm-started across.
+# One robot for the whole task is the only coherent option.
+#
+# FINGERS
+# -------
+# Fingers are NOT tracked. `use_finger_primitive` drives the 14 finger joints
+# from a 2-scalar open/close primitive, and `use_motion_hand_actions` reads that
+# scalar pair straight out of the motion pkl as hand_action_left/right
+# (-1 open, +1 closed, thresholded at 0). So the reference stays 29 body DoF.
+#
+# The signal shipped in grail_chair_ha is WRONG and must not be used: Stage 2's
+# contact detection reports the left hand touching only at f9-11/f90/f99-115 and
+# misses f24-84 entirely, so the left hand is commanded OPEN through the whole
+# carry and CLOSED at f0-10 while 34 cm from the chair. grail_chair_v2 carries a
+# signal derived from palm-to-mesh geometry instead
+# (data/stage3_grasp_signal.py), validated on the physics: frames where the
+# chair is raised with both hands open went 223/240 -> 0/240.
+#
+# BOOKSHELF
+# ---------
+# Stage 2 reconstructed only the chair, but the bookshelf never needed
+# reconstructing - its transform was recorded at render time in
+# first_frame_pose.pickle["static_objects"]. data/stage3_static_props.py maps it
+# into the motion-lib frame by anchoring on the chair (the one object present in
+# both frames) and bakes scale+rotation into the mesh, so it spawns here with
+# identity rotation at scene_scale 1. It occupies SONIC's `add_table` slot,
+# which is a kinematic collision body from an arbitrary USD.
+#
+# Two independent checks that the placement is right: the robot's left wrist at
+# f150 lands 12 cm from the derived BASKET position (never an input to the fit),
+# and the baked basket's underside sits at z=1.361 against a shelf top of
+# z=1.361.
+#
+# TWO OBJECTS, VIA A SPLIT
+# ------------------------
+# The clip manipulates the chair AND the basket, but SONIC drives exactly one:
+# at reset commands.py positions one object and parks every other prim 100 m
+# underground, and every reward/termination/observation hardcodes
+# object_root_pos[:, 0].
+#
+# The way through without engine changes is that the two are never manipulated
+# at the same time. data/stage3_split_chair.py cuts the clip into two motions,
+# each with a single dynamic object:
+#
+#     __carry   f0..135    object = chair    pick up, carry 1.96 m, place, step up
+#     __basket  f128..240  object = basket   reach, take it, step down
+#
+# multi_object_per_env then spawns one prim per USD and activates the one whose
+# name matches the active motion key, so object_usd/<motion_key>.usd selects the
+# chair or the basket automatically.
+#
+# The static geometry differs per phase but `table_usd_path` is GLOBAL, while
+# table_pos/table_quat are per-motion (meta/<key>.pkl). So one USD holds the
+# bookshelf AND the chair frozen at its placed pose, and position switches it in
+# and out: (0,0,0) for the basket phase, (0,0,-100) parks it for the carry.
+# Parking is required, not tidy - a static chair sitting at the placement target
+# would collide with the chair being carried into it.
+
+defaults:
+  - /algo: ppo_im_phc
+  - /manager_env: base_env
+  - /callbacks/read_eval
+  - override /trainer: trl_ppo_aux
+  - override /actor_critic: hoi_staged_mlp_aux
+  - override /manager_env/observations/policy: hoi_manip/grab_43dof_policy_mf_delta_bps
+  - override /manager_env/observations/critic: hoi_manip/grab_43dof_critic_mf_delta
+  - override /manager_env/observations/policy_atm: proprio_hist
+  - override /manager_env/observations/tokenizer: unitoken_all_noz_heading
+  - override /manager_env/rewards: hoi_manip/grab_rewards_no_lift_ucw
+  - override /manager_env/events: tracking/no_dr
+  - override /manager_env/terminations: tracking/hoi_grab_no_lift
+  - _self_
+
+use_manager_env: true
+
+exp_base: ${hydra:runtime.choices.exp}
+motion_shard_by_rank: true
+exp_var: chair_grail
+experiment_name: ${exp_base}_${exp_var}
+experiment_dir: ${base_dir}/${project_name}/${experiment_name}-${timestamp}
+
+num_envs: 4096
+project_name: GRAIL_Chair
+
+actor_prop_history_length: 10
+actor_actions_history_length: 10
+critic_prop_history_length: 10
+critic_actions_history_length: 10
+
+manager_env:
+  config:
+    safe_nan: true
+    gpu_collision_stack_size_exp: 30
+
+    robot:
+      type: g1_43dof
+
+    terrain_type: plane
+    env_spacing: 10.0
+    eval_camera_offset: [2, -2, 1]
+
+    replicate_physics: false
+
+    add_object: true
+    object_is_dynamic: true
+    add_table: true
+    # The bookshelf, standing in for the "table" slot. Scale and rotation are
+    # baked into the USD, so no scene_scale coupling and identity rotation.
+    table_usd_path: ${oc.env:PWD}/data/motion_lib/grail_chair_split/common/static_scene.usd
+    # No table_position/table_quat here on purpose: commands.py re-reads them
+    # from meta/<motion_key>.pkl at every reset, so a config value would only
+    # set the initial spawn and then be silently overridden per motion.
+    # NOT multi_object_per_env. That mode renames the prims to Object_<name>,
+    # but the grasp contact sensors and the hand frame transformer are hardcoded
+    # to {ENV_REGEX_NS}/Object, so the scene fails to build:
+    #   "Sensor at path '/World/envs/env_.*/Object' could not find any bodies
+    #    with contact reporter API."
+    # ONE-PER-ENV mode is what this task actually wants anyway: MultiUsdFileCfg
+    # with random_choice=False gives env k USD[k % N] while use_paired_motions
+    # gives env k motion[k % N], so each env gets the object belonging to its
+    # motion, and the prim stays /Object so every sensor still binds.
+    # commands.py:330-355 enforces the pairing - it aborts unless the USD stems
+    # equal the motion keys in order, which is why object_usd/*.usd are named
+    # after the motions.
+    object_mass: 3.0        # a real chair, not a 0.1 kg tabletop prop
+    lift_contact_force_threshold: 0.1
+    scene_scale: 1.0
+    use_motion_hand_actions: true
+    use_finger_primitive: true
+    motion_meta_info_path: null
+
+    # NOT both hands merged into one list - that was a bug, caught only when
+    # the warm-start checkpoint failed to load (size mismatch: 996 vs 1020,
+    # exactly 8 links x 3 axes). `contact_sensor_finger_links` and
+    # `left_contact_sensor_finger_links` are two SEPARATE sensor slots
+    # (modular_tracking_env_cfg.py:1055-1075), not one list for both hands.
+    # pnp_table.yaml never sets the left key, so it already defaults to
+    # _DEX_LEFT_FINGER_LINKS (palm, thumb_2, index_1, middle_1) for any
+    # dex-hand robot - pnp_table_warmstart was NOT one-handed in its
+    # observations, it already senses the left hand at that smaller default
+    # resolution. Kept here unchanged, matching the checkpoint exactly.
+    contact_sensor_finger_links:
+      - right_hand_palm_link
+      - right_hand_thumb_0_link
+      - right_hand_thumb_1_link
+      - right_hand_thumb_2_link
+      - right_hand_index_0_link
+      - right_hand_index_1_link
+      - right_hand_middle_0_link
+      - right_hand_middle_1_link
+
+    train_only_events:
+      - push_robot
+      - force_push_robot
+
+    use_latent_residual: true
+    latent_residual_mode: "pre_quantization"
+    latent_residual_scale: 0.1
+    meta_action_dim: 66
+    tokenizer_action_dim: 64
+    hand_action_dim: 2
+
+    finger_primitive:
+      primitive_action_map:
+        left:
+          dof_names:
+            - left_hand_index_0_joint
+            - left_hand_index_1_joint
+            - left_hand_middle_0_joint
+            - left_hand_middle_1_joint
+            - left_hand_thumb_0_joint
+            - left_hand_thumb_1_joint
+            - left_hand_thumb_2_joint
+          pos_0: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+          pos_1: [-1.42857143, -2.14285714, -1.42857143, -2.14285714, 0.0, 1.0, 1.0]
+          discrete: true
+        right:
+          dof_names:
+            - right_hand_index_0_joint
+            - right_hand_index_1_joint
+            - right_hand_middle_0_joint
+            - right_hand_middle_1_joint
+            - right_hand_thumb_0_joint
+            - right_hand_thumb_1_joint
+            - right_hand_thumb_2_joint
+          pos_0: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+          pos_1: [1.42857143, 2.14285714, 1.42857143, 2.14285714, 0.0, -1.0, -1.0]
+          discrete: true
+
+    action_transform_module_cfg: models/sonic_manipulation_base/model_config.yaml
+    action_transform_module_checkpoint: models/sonic_manipulation_base/last.pt
+
+    use_staged_wrapper: false
+
+  commands:
+    motion:
+      motion_lib_num_dof: 29
+      hand_default_positions: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      num_future_frames: 10
+      dt_future_ref_frames: 0.1
+      smpl_num_future_frames: 10
+      smpl_dt_future_ref_frames: 0.02
+      debug_vis: false
+      use_paired_motions: true
+      start_from_first_frame: false
+      sample_before_contact: true
+      sample_from_n_initial_frames: 30
+
+      pose_range:
+        x: [0, 0]
+        y: [0, 0]
+        z: [0, 0]
+        roll: [0, 0]
+        pitch: [0, 0]
+        yaw: [0, 0]
+
+      velocity_range:
+        x: [0, 0]
+        y: [0, 0]
+        z: [0, 0]
+        roll: [0, 0]
+        pitch: [0, 0]
+        yaw: [0, 0]
+
+      joint_position_range: [0, 0]
+      joint_velocity_range: [0, 0]
+      object_position_randomize: false
+
+      encoder_sample_probs:
+        g1: 1.0
+        teleop: 0.0
+        smpl: 0.0
+
+      motion_lib_cfg:
+        adaptive_sampling: null
+        smpl_motion_file: dummy
+        smpl_y_up: true
+
+  observations:
+    policy:
+      enable_corruption: false
+    tokenizer:
+      enable_corruption: false
+    policy_atm:
+      enable_corruption: false
+
+  rewards:
+    # Object tracking / task objective.
+    object_tracking_reward:
+      weight: 0.0
+    finger_primitive_limit:
+      weight: 0.0
+
+    # Grasping.
+    grasp_reward:
+      weight: 5.0
+      params:
+        gate_with_contact_label: true
+        hand: right_hand
+        command_name: motion
+        min_contacts: 8
+    grasp_finger_direction:
+      weight: 10.0
+      params:
+        use_contact_center: true
+
+    # Body orientation tracking.
+    tracking_anchor_ori:
+      weight: 2.5
+    tracking_relative_body_ori:
+      weight: 5.0
+
+    # Action regularization.
+    meta_action_rate_l2:
+      weight: -0.1
+    full_latent_rate_l2:
+      weight: -0.01
+
+    # Termination / safety penalties.
+    is_terminated:
+      weight: -10.0
+    hand_table_contact_penalty:
+      _target_: isaaclab.managers.RewardTermCfg
+      func: gear_sonic.envs.manager_env.mdp:reward_hand_table_contact_penalty
+      weight: -1.0
+    approach_velocity_penalty:
+      _target_: isaaclab.managers.RewardTermCfg
+      func: gear_sonic.envs.manager_env.mdp:reward_approach_velocity_penalty
+      weight: -15.0
+      params:
+        sensor_cfg:
+          _target_: isaaclab.managers.SceneEntityCfg
+          name: object_to_hand_contact_sensor
+        sigma: 0.25
+        contact_threshold: 0.1
+        min_contacts: 8
+        disable_after_contact: false
+    upright_penalty:
+      _target_: isaaclab.managers.RewardTermCfg
+      func: gear_sonic.envs.manager_env.mdp:upright_penalty
+      weight: 0
+      params:
+        command_name: motion
+        body_names:
+          - pelvis
+          - torso_link
+
+  terminations:
+    object_pos_deviation:
+      _target_: isaaclab.managers.TerminationTermCfg
+      func: gear_sonic.envs.manager_env.mdp:object_pos_deviation
+      params:
+        command_name: "motion"
+        threshold: 0.1
+    hand_table_contact_termination:
+      _target_: isaaclab.managers.TerminationTermCfg
+      func: gear_sonic.envs.manager_env.mdp:hand_table_contact_termination
+      params:
+        sensor_cfg:
+          _target_: isaaclab.managers.SceneEntityCfg
+          name: "table_to_hand_contact_sensor"
+        force_threshold: 1.0
+
+algo:
+  config:
+    empty_cache_every_n_ppo_epoch: -1
+    num_steps_per_env: 24
+    use_clampped_std: true
+    std_clamp_min: 0.001
+    std_clamp_max: 0.5
+    max_grad_norm: 0.1
+    num_learning_iterations: 20000
+    actor:
+      backbone:
+        aux_loss_coef:
+          latent_l2: 0.1
+
+callbacks:
+  model_save:
+    save_frequency: 500
+  im_resample:
+    _target_: gear_sonic.trl.callbacks.im_resample_callback.ImResampleCallback
+    motion_resample_frequency: 250

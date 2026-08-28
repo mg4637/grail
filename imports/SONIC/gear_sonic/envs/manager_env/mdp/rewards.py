@@ -59,6 +59,8 @@ class RewardsCfg:
     feet_contact_requirement = None
     feet_contact_requirement_motion_lib = None
     tracking_vr_5point_local = None
+    # feet-only variant of tracking_vr_5point_local (GRAIL table climb)
+    tracking_feet_pos = None
     motion_5point_local_pos = None
     feet_acc = None
     # HOI manipulation rewards
@@ -402,6 +404,46 @@ def tracking_local_vr_5point_error(env: ManagerBasedRLEnv, command_name: str, st
     diff = robot_5point_pos - ref_5point_pos
     error = torch.sum(torch.square(diff), dim=-1)
     return torch.exp(-error.mean(-1) / std**2)
+
+
+def tracking_local_point_subset_error(
+    env: ManagerBasedRLEnv, command_name: str, std: float, point_indices: list[int]
+):
+    """Same as tracking_local_vr_5point_error, but over a SUBSET of the points.
+
+    Added for the GRAIL table climb. tracking_local_vr_5point_error averages the
+    squared error of all five points before the exponential, so one badly placed
+    point is diluted by four well-tracked ones: measured on the failing rollout,
+    the feet tracked to 0.024-0.027 while the wrists sat at 0.037-0.048, and the
+    combined term still read as "good" on the exact frames where the foot missed
+    the tabletop by up to 0.41 m. Selecting a subset lets a separate term put a
+    tight Gaussian on just the feet, so foot placement gets its own gradient.
+
+    This needs no knowledge of the table's footprint: the reference's own feet
+    land inside it, so tracking them tightly IS the edge-awareness.
+
+    Args:
+        env: The environment.
+        command_name: Name of the tracking command term.
+        std: Standard deviation for the Gaussian kernel.
+        point_indices: Indices into cfg.reward_point_body to score.
+
+    Returns:
+        Reward tensor of shape (num_envs,) in [0, 1].
+    """
+    command: TrackingCommand = env.command_manager.get_term(command_name)
+    n = len(command.cfg.reward_point_body)
+    ref_diff = command.reward_point_body_pos_w - command.anchor_pos_w[:, None, :]
+    ref_quat = command.anchor_quat_w.view(env.num_envs, 1, 4).repeat(1, n, 1)
+    ref_pos = quat_apply(quat_inv(ref_quat), ref_diff)
+    robot_quat = command.robot_anchor_quat_w.view(env.num_envs, 1, 4).repeat(1, n, 1)
+    robot_diff = (
+        command.robot_reward_point_body_pos_w - command.robot_anchor_pos_w[:, None, :]
+    )
+    robot_pos = quat_apply(quat_inv(robot_quat), robot_diff)
+    error = torch.sum(torch.square(robot_pos - ref_pos), dim=-1)
+    idx = torch.as_tensor(point_indices, device=error.device, dtype=torch.long)
+    return torch.exp(-error[:, idx].mean(-1) / std**2)
 
 
 def tracking_vr_3point_error_pos_force(
