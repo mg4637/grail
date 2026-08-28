@@ -614,3 +614,102 @@ reference *and* added a reward term in the same experiment. When it regressed, s
 two took a post-hoc FK comparison of the references; had they differed materially, the run would
 have been uninterpretable and the six hours wasted outright. The habit of bundling changes is
 what has made four runs yield no attributable progress.
+
+---
+
+## Audit against `howto.md`, the actual pipeline documentation
+
+Prompted by a direct question — do we do what the roadmap says, and has the code been damaged
+by patches made without reading it? The honest answer is that we follow the documented pipeline
+in some places and have drifted from it in others, and that the drift most likely to explain
+"no progress" is not any of the patches.
+
+### Where we match the documentation
+
+* Config choice (`scene/terrain_tracking` for whole-body scene interaction), data layout
+  (`robot/`, `objects/`, `object_usd/`, `meta/`), and the eval flags (`eval_callbacks=im_eval`,
+  `run_eval_loop=False`, `max_render_envs`, the motion-shard resets) are all as documented.
+* **Skipping `process.py` / the `_ha` twin is correct.** The docs say terrain data should skip
+  `process.sh`, and the repo bears this out: `grail_chair_ha` exists because the chair clip is
+  manipulation, while the table clip has no `_ha` and needs none. This deviation was right.
+
+### Three deviations that are mistakes
+
+**1. The GMR submodule was edited directly, and the project has a dedicated mechanism to
+prevent exactly that.** `grail/adapters/gmr.py` states it in its own docstring:
+
+> "Rather than editing files inside the submodule (which forces `imports/GMR` to a 'dirty'
+> working tree and complicates submodule bumps), we monkey-patch the public package at import
+> time."
+
+The earlier plan edited `imports/GMR/assets/unitree_g1/g1_mocap_29dof.xml` (the truncated joint
+ranges) and `imports/GMR/general_motion_retargeting/motion_retarget.py` (the positional
+`solve_ik` call). Both belonged in that adapter as runtime patches. `git status` now shows
+`m imports/GMR` — precisely the failure mode the docstring names. The fix is mechanical: move
+both patches into `grail/adapters/gmr.py` and revert the submodule.
+
+**2. `--zero_out_wrist` is the DOCUMENTED flag for this class of data, and it was removed
+without flagging the departure.** From the docs:
+
+> "Terrain (curbs, slopes, stairs) and sitting data involve whole-body interaction with large
+> environmental objects, not hand-held manipulation. Use `--zero_out_wrist` to skip hand IK."
+
+A child climbing onto a table is that case. The flag was treated here as the cause of a defect
+(frozen wrists → palms that cannot be oriented) and dropped for `grail_table_v4w`/`v5`. That is
+defensible for THIS clip, because the child really does plant both hands on the tabletop — but
+it was never recorded as a deviation from documented intent, and it has a consequence that was
+not considered: the released terrain policy used as the warm start was itself trained on
+zero-wrist data, so the v5 reference's wrist behaviour is off-distribution relative to the
+weights being finetuned.
+
+**3. Three bespoke motion-surgery passes exist that are not in the pipeline at all** —
+`stage3_resolve_penetration.py`, `stage3_fix_foot_planting.py`, `stage3_fix_hand_contact.py`.
+The documented flow is retarget → process → compute_bps. Ours mutates the retargeted output
+with custom optimisers. This is not inherently wrong — the documented pipeline genuinely does
+not know the scene exists, which is the defect that motivated the first of these — but it means
+the motion library is no longer something the documented tooling produces, and each pass adds a
+silent-failure surface. One of them already did fail silently, breaking a knee (f195: knee
+1.506 → 0.071 rad) before a `max_height` gate was added.
+
+### The likeliest cause of no progress, which is not a patch bug
+
+| | envs | iterations |
+|---|---|---|
+| `terrain_release` (the shipped policy, `model_step_020000.pt`) | 1024 | **20000** |
+| `terrain_stairs_warmstart` | 1024 | **30000** |
+| docs, terrain finetuning | 4096 | **20000** |
+| **every table run in this project** | 2048 | **6000** |
+
+Every run was **30% of the documented finetune length**, on one GPU where the documented launch
+template uses eight. Total timesteps 295 M against the released model's ~491 M. The task may
+well be as tractable as it looks; it is entirely possible it has never once been trained
+properly, and that four undertrained runs were then read as evidence about references and
+reward functions.
+
+Also off-menu: the docs list `terrain_tracking`'s supported scenes as `indoor1-sitting`,
+`indoor1-terrain-{curb,slope}`, `indoor1-{syn,gen}-stairs`, and say plainly "please pick the
+right tracking config given the scene config used in 2D HOI generation". Ours is
+`kid_indoor2-climb-table` — the nearest conceptual match, but not a listed combination.
+
+### Was the code damaged
+
+Not destructively, and this was checked rather than asserted. `data/motion_lib/grail_table/` is
+untouched, everything is in git, and the GMR submodule edits amount to 19 changed lines that
+revert cleanly. The SONIC change is purely additive — one new function and one `None` dataclass
+field — and the only config referencing it is ours, so no released config's behaviour changed.
+
+The damage is methodological rather than corruption: submodule edits that bypass the adapter, an
+undocumented motion-surgery layer, and four runs at a third of the recommended length whose
+results were then interpreted as facts about references and rewards.
+
+### Revised order of work
+
+1. **One training run at the documented budget** — 20000 iterations — on the unmodified
+   `grail_table_v3f` reference with `tracking_feet_pos` removed. This is the first honest test
+   of whether the task trains at all, and it presumes none of the patches are correct.
+2. Move the two GMR patches into `grail/adapters/gmr.py` and revert `imports/GMR`.
+3. Only after (1) does any further reference surgery deserve GPU time.
+
+This supersedes the free-base feasibility work proposed in the previous section as the *first*
+step. That analysis is still worth doing, but it is a way of explaining a failure we have not
+yet legitimately observed: the runs so far were too short to conclude the motion is infeasible.
