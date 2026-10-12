@@ -17,6 +17,7 @@ from grail.optimization.loss_terms import (
     reg_loss,
     smoothness_loss,
 )
+from grail.optimization.terrain import TerrainHeightMap
 from grail.rendering.camera import project_world_to_screen, unproject_depth_map_to_world
 
 
@@ -39,6 +40,7 @@ class LossComputer:
         self.num_body_joints = num_body_joints
         self.logger = logger
         self._depth_loss_cache = None
+        self._terrain_cache = None
 
     # ── Dispatch ─────────────────────────────────────────────────────────────
 
@@ -60,6 +62,7 @@ class LossComputer:
         "contact_distribution_smoothness": "_contact_distribution_smoothness_loss",
         "obj_precontact_reg": "_obj_precontact_reg_loss",
         "penetration": "_penetration_loss",
+        "terrain_support": "_terrain_support_loss",
     }
 
     def compute_loss(self, data, pred, loss_cfg):
@@ -193,6 +196,44 @@ class LossComputer:
         height = cfg.get("height", 0.14)
         gravity_axis = cfg.get("gravity_axis", "z")
         return weight * ground_loss(pred.human.verts_seq, gravity_axis=gravity_axis, height=height)
+
+    def terrain_foot_gaps(self, data, pred, cfg=None):
+        """Per-frame vertical gap between each foot and the terrain surface beneath it.
+
+        gap = (height of the lowest foot vertex above the terrain under it), measured in the static
+        object's own frame (world = R @ canonical + t, as in `_penetration_loss`). gap > 0: hovering,
+        0: touching, < 0: penetrating. Returns (left, right), each of shape (L,).
+        """
+        cfg = cfg or {}
+        if self._terrain_cache is None:
+            self._terrain_cache = TerrainHeightMap(
+                data.obj.verts.detach().cpu().numpy(),
+                data.obj.faces.detach().cpu().numpy(),
+                cell=cfg.get("cell", 0.01),
+            )
+        terrain = self._terrain_cache
+        clearance = cfg.get("clearance", 0.0)
+        verts = pred.human.verts_seq                      # (L, V, 3) world
+        R, t = pred.obj.R, pred.obj.trans                 # (L, 3, 3), (L, 3)
+        gaps = []
+        for names in (["L_Ankle", "L_Toe"], ["R_Ankle", "R_Toe"]):
+            pts = self.human_model.get_verts_segment(verts, names)       # (L, N, 3)
+            local = torch.matmul(pts - t[:, None, :], R)                 # world -> object frame
+            h = terrain.height(local[..., :2])                           # (L, N) constants
+            gaps.append((local[..., 2] - h - clearance).min(dim=1).values)
+        return gaps[0], gaps[1]
+
+    def _terrain_support_loss(self, data, pred, cfg, weight):
+        """Feet must rest on the terrain: the LOWER foot of each frame is pulled onto the surface beneath
+        it (hover and penetration both penalised, squared); the other foot may lift freely but may not
+        go below the surface. GRAIL otherwise has no term tying feet to non-flat terrain (see
+        `_ground_loss`: fixed height; `_penetration_loss`: only penetration, no hover)."""
+        left, right = self.terrain_foot_gaps(data, pred, cfg)
+        lower = torch.minimum(left, right)
+        upper = torch.maximum(left, right)
+        support = (lower**2).mean()
+        penetration = (torch.relu(-upper) ** 2).mean()
+        return weight * (support + cfg.get("penetration_scale", 1.0) * penetration)
 
     def _human_global_init_reg_loss(self, data, pred, cfg, weight):
         pred_trans = pred.human.trans

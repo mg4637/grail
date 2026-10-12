@@ -1,0 +1,11 @@
+{
+  "_note": "Claude's answers standing in for gpt-4o in grail.core.contact_label.detect_interaction. Keyed by frame filename. Question: is the person in physical contact with the object (stairs_wide3)?",
+  "000000.jpg": {"in_contact": false, "confidence": "high"},
+  "000030.jpg": {"in_contact": false, "confidence": "high"},
+  "000060.jpg": {"in_contact": false, "confidence": "medium"},
+  "000090.jpg": {"in_contact": true,  "confidence": "high"},
+  "000120.jpg": {"in_contact": true,  "confidence": "high"},
+  "000150.jpg": {"in_contact": true,  "confidence": "high"},
+  "000180.jpg": {"in_contact": true,  "confidence": "high"},
+  "000210.jpg": {"in_contact": true,  "confidence": "high"}
+}
