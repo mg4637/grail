@@ -1,0 +1,31 @@
+# Chair task: the kid takes a chair standing in front of it and carries it next to a bookshelf (basket on top of the shelf).
+# Layout (see docs_learning/lessons/15_chair_task_layout.py): kid, chair and shelf on one line, kid faces the shelf.
+# Robot-frame layout: kid at origin facing +X, chair at x = 0.8, shelf centre at x = 3.3 (chair-to-shelf 2.5 m centre to centre).
+# Mapped into the indoor1 room: robot +X -> Blender -Y, robot +Y -> Blender +X, kid at (10.5, 10.0). Floor height 0.1365.
+# Objects come out of lesson 13 z-up with their FRONT toward -Y; yaw 180 turns the front toward the kid (+Y here).
+indoor1-chair-carry:
+  character_pos: [10.5, 10.0, 0.1365]
+  character_rot: [90, 0, 0]
+  character_scale: [0.01, 0.01, 0.01]
+  obj_pos: [10.5, 9.2, 0.1365]
+  obj_rot: [0, 0, 180]
+  static_objects:
+    bookshelf:
+      name: chair_task/bookshelf/bookshelf.obj
+      pos: [10.5, 6.7, 0.1365]
+      rot: [0, 0, 180]
+      scale: [1.0, 1.0, 1.0]
+      obj_on_table: false
+    basket:
+      name: chair_task/basket/basket.obj
+      pos: [10.5, 6.7, 1.9365]
+      rot: [0, 0, 180]
+      scale: [1.0, 1.0, 1.0]
+      obj_on_table: false
+  camera_elevation: 5
+  camera_azimuth: 150.0
+  camera_radius: 7.0
+  camera_offset: [0, -1.65, 1.0]
+  camera_azimuth_rand_max: 0.0
+  render_width: 1280
+  render_height: 720

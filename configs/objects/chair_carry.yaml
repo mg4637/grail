@@ -1,0 +1,5 @@
+dataset: ChairTask
+objects:
+  wooden_chair:
+    obj_scale: [1.0, 1.0, 1.0]
+    scene: indoor1-chair-carry
