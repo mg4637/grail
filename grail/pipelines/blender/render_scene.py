@@ -537,21 +537,19 @@ def main():
         if args.rand_scene_seed is not None:
 
             # randomize table height
-            table_offset = [0, 0, 0]
+            # (chair task patch: several static objects are allowed. Each one gets its OWN random offset; with a single
+            #  static object this is identical to the original behaviour. Set obj_on_table: false for objects that the
+            #  dynamic object does not rest on, otherwise the dynamic object is shifted with every one of them.)
             if "static_objects" in scene_config:
-                assert (
-                    len(loaded_static_objects) == 1
-                ), "Only one static object is supported for now"
                 for obj_key, obj in loaded_static_objects.items():
                     if "pos_rand_max" in scene_config["static_objects"][obj_key]:
                         offsets = sample_rand_3d(
                             scene_config["static_objects"][obj_key], "pos_rand_max", "pos_rand_min"
                         )
                         for i in range(3):
-                            table_offset[i] += offsets[i]
-                            obj.location[i] += table_offset[i]
+                            obj.location[i] += offsets[i]
                             if obj.get("obj_on_table", True):
-                                loaded_obj.location[i] += table_offset[i]
+                                loaded_obj.location[i] += offsets[i]
 
             # Save initial transforms so we can restore them on each retry
             char_loc_init = [loaded_character.location[i] for i in range(3)]
