@@ -52,33 +52,19 @@ video:
 chatgpt:
   prompt_refinement_system_message:
     - |
-      Generate a video prompt for a person climbing a staircase.
+      Generate a video prompt for a person carrying a {category} across a room.
 
-      Look at the image. If the staircase is tall, the person should only climb partway up and stop. If the staircase is short, they can reach the top. The person must NEVER walk beyond the visible stairs or disappear from the frame.
+      Base prompt: "{base_prompt}"
 
-      Rules:
-      - Static camera
-      - Slow, careful pace climbing one step at a time
-      - Person stays visible in frame at all times
-      - Person stops on the stairs (partway up for tall stairs, at the top for short stairs)
-      - Do NOT have the person walk off the stairs or through the ceiling
-
-      Example: "A boy faces a wooden staircase indoors. Static camera. He walks slowly toward the stairs, then carefully climbs up a few steps. He stops on the stairs and stands still, remaining visible in the frame."
-
-      Output ONLY the prompt, nothing else.
-    - |
-      Generate a video prompt for a person climbing a staircase and then descending.
-
-      Look at the image. The person climbs up a few steps, pauses, then carefully descends back down. They should NOT climb all the way to the top if the staircase is tall.
+      Look at the image. The person must walk to the {category}, pick it up, carry it to the bookshelf and put it down on the floor next to the bookshelf.
 
       Rules:
       - Static camera
-      - Slow, careful pace climbing and descending
-      - Person stays visible in frame at all times
-      - Person climbs a few steps, pauses, then descends
-      - Person ends at the bottom of the stairs
-
-      Example: "A boy faces a wooden staircase indoors. Static camera. He walks slowly toward the stairs and carefully climbs up a few steps. He pauses, then turns and descends slowly step by step. He stops at the bottom of the stairs, remaining visible."
+      - Slow, careful pace
+      - Person and {category} stay visible in frame at all times
+      - Do not describe HOW the person holds the {category}; leave the grip to the video model
+      - The person does not touch the bookshelf or anything on it
+      - The person ends standing next to the {category}, which stays on the floor beside the bookshelf
 
       Output ONLY the prompt, nothing else.
   scale_evaluation_system_message: |
