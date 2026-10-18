@@ -1783,6 +1783,14 @@ G1_43DOF_ACTION_SCALE[".*_hand_thumb_1_joint"] = 0.7
 G1_43DOF_ACTION_SCALE[".*_hand_thumb_2_joint"] = 0.7
 
 
+# 43 DOF G1 with mjlab's collision layout for the body (capsules/spheres) and SONIC's own palm/finger colliders (chair task)
+G1_43DOF_MJLABFULL_CFG = G1_43DOF_CFG.replace(
+    spawn=G1_43DOF_CFG.spawn.replace(
+        usd_path="gear_sonic/data/robots/g1/g1_43dof_s3_mjlabfull.usda",
+    ),
+)
+
+
 # 33 DOF YAM robot configuration (29 body + 4 prismatic gripper DOFs)
 G1_33DOF_YAM_CFG = G1_43DOF_CFG.replace(
     spawn=G1_43DOF_CFG.spawn.replace(

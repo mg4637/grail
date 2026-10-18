@@ -32,6 +32,7 @@ ROBOT_RUNTIME_INFO = {
     "g1_model_12_dex_delayed": {"robot_has_hands": True, "hand_type": "dex"},
     "g1_model_12_dex_waist": {"robot_has_hands": True, "hand_type": "dex"},
     "g1_43dof": {"robot_has_hands": True, "hand_type": "dex"},
+    "g1_43dof_mjlabfull": {"robot_has_hands": True, "hand_type": "dex"},
     "g1_43dof_larger_hip_no_head_elbow": {
         "robot_has_hands": True,
         "hand_type": "dex",
@@ -1691,6 +1692,13 @@ class ModularTrackingEnvCfg(ManagerBasedRLEnvCfg):
             },
             "g1_43dof": {
                 "robot_cfg": g1.G1_43DOF_CFG,
+                "action_scale": g1.G1_43DOF_ACTION_SCALE,
+                "isaaclab_to_mujoco_mapping": g1.G1_ISAACLAB_TO_MUJOCO_MAPPING,
+                "robot_has_hands": True,
+                "hand_type": "dex",
+            },
+            "g1_43dof_mjlabfull": {
+                "robot_cfg": g1.G1_43DOF_MJLABFULL_CFG,
                 "action_scale": g1.G1_43DOF_ACTION_SCALE,
                 "isaaclab_to_mujoco_mapping": g1.G1_ISAACLAB_TO_MUJOCO_MAPPING,
                 "robot_has_hands": True,
