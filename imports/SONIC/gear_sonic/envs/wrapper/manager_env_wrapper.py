@@ -1271,6 +1271,44 @@ class ManagerEnvWrapper:
     def reinit_dr(self, **_kwargs):
         pass
 
+    @staticmethod
+    def curriculum_value(iteration, iterations, values):
+        """Piecewise-constant schedule: the value of the last milestone <= iteration (values[0] before the first)."""
+        value = values[0]
+        for it, v in zip(iterations, values):
+            if iteration >= it:
+                value = v
+        return value
+
+    def set_training_iteration(self, iteration):
+        """Iteration-based termination curriculum (called by the PPO trainer at the start of every iteration).
+
+        Config (``manager_env.config.termination_curriculum``), e.g. for the chair task::
+
+            termination_curriculum:
+              object_pos_deviation: {iterations: [0, 5000, 10000], values: [0.5, 0.3, 0.15]}
+
+        sets ``params["threshold"]`` of that termination term to values[k] for iterations[k] <= iteration.
+        The iteration is the trainer's ``global_step`` (restored on resume), so the schedule survives restarts.
+        Returns a dict of the current values for logging (W&B key ``Curriculum/<term>_threshold``).
+        """
+        cur = self.config.get("termination_curriculum", None)
+        log = {}
+        if not cur:
+            return log
+        base = self.env.unwrapped if hasattr(self.env, "unwrapped") else self.env
+        for term_name, spec in cur.items():
+            value = float(self.curriculum_value(iteration, list(spec["iterations"]), list(spec["values"])))
+            term_cfg = base.termination_manager.get_term_cfg(term_name)
+            if term_cfg.params.get("threshold") != value:
+                logger.info(
+                    f"[CURRICULUM] iteration {iteration}: termination '{term_name}' threshold "
+                    f"{term_cfg.params.get('threshold')} -> {value}"
+                )
+                term_cfg.params["threshold"] = value
+            log[f"{term_name}_threshold"] = value
+        return log
+
     def setup_keyboard(self):
         try:
             from isaaclab.devices.keyboard.se2_keyboard import Se2Keyboard, Se2KeyboardCfg

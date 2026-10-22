@@ -1722,6 +1722,10 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                     self, self.schedule_dict, self.state.global_step
                 )
 
+            # iteration-based termination curriculum (see ManagerEnvWrapper.set_training_iteration)
+            if hasattr(self.env, "set_training_iteration"):
+                self.curriculum_log_dict = self.env.set_training_iteration(self.state.global_step)
+
             reinit_dr_freq = self.env.config.get("reinit_dr_freq", 0)
             if reinit_dr_freq > 0 and self.state.global_step % reinit_dr_freq == 0:
                 self.env.reinit_dr()
@@ -1911,6 +1915,8 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                 # Add scheduled parameters to metrics
                 for param_name, param_value in self.scheduled_params_dict.items():
                     log_dict[f"scheduled_params/{param_name}"] = param_value
+                for cur_name, cur_value in getattr(self, "curriculum_log_dict", {}).items():
+                    log_dict[f"Curriculum/{cur_name}"] = cur_value
 
                 if hasattr(self.policy_model, "std"):
                     metrics["Policy/mean_noise_std"] = self.policy_model.std.mean().item()

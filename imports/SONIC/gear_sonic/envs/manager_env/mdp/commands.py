@@ -2731,6 +2731,21 @@ class TrackingCommand(CommandTerm):
                 dim=-1
             )
 
+        # Start frame of the current episode (to see where RSI / adaptive sampling starts episodes)
+        self.metrics["start_frame"] = self.motion_start_time_steps.float()
+
+        # Object tracking error (same quantities as the object_pos_deviation termination and the
+        # object_tracking_reward): simulated object vs reference object. Logged as
+        # Env/Metrics/motion/error_object_pos [m] and error_object_rot [rad] (only if the scene has an "object").
+        if "object" in self._env.scene.rigid_objects:
+            obj = self._env.scene["object"]
+            self.metrics["error_object_pos"] = torch.norm(
+                self.object_root_pos[:, 0, :3] - obj.data.root_pos_w[:, :3], dim=-1
+            )
+            self.metrics["error_object_rot"] = quat_error_magnitude(
+                self.object_root_quat[:, 0], obj.data.root_quat_w
+            )
+
     def resample_all_commands(self):
         """Resample motion clips and reset state for all environments at once."""
         self._resample_command(torch.arange(self.num_envs))
