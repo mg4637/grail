@@ -74,6 +74,7 @@ class RewardsCfg:
     hand_table_contact_penalty = None
     # Object motion tracking reward (OmniGrasp-style r_t^obj)
     object_tracking_reward = None
+    object_tracking_reward_left = None  # same function with the left-hand contact sensor (chair task, stage 2)
     object_lift_contact_reward = None
     # Finger primitive action limit penalty
     finger_primitive_limit = None
